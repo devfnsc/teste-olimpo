@@ -1,0 +1,113 @@
+"use client";
+
+import { useRef, useState } from "react";
+import { Upload, Loader2, AlertTriangle } from "lucide-react";
+
+export type ResultadoUpload = { asset_id: string; papel: string };
+
+/**
+ * Envio de arquivo por seleção ou arrastar.
+ *
+ * Multipart, não JSON: uma imagem de identidade tem dezenas de megabytes, e
+ * base64 dentro de JSON inflaria em um terço sem ganho nenhum.
+ */
+export function Upload_({
+  personaId, papel = "reference", rotulo, aoEnviar, compacto = false,
+  multiplo = false, children,
+}: {
+  personaId?: string;
+  papel?: string;
+  rotulo?: string;
+  aoEnviar?: (r: ResultadoUpload) => void;
+  compacto?: boolean;
+  /** Vários arquivos numa tacada. Enviados em série, não em paralelo: o
+   *  destino grava por hash e uploads simultâneos do mesmo arquivo
+   *  disputariam a mesma linha. */
+  multiplo?: boolean;
+  children?: React.ReactNode;
+}) {
+  const input = useRef<HTMLInputElement>(null);
+  const [enviando, setEnviando] = useState(false);
+  const [sobre, setSobre] = useState(false);
+  const [erro, setErro] = useState<string | null>(null);
+
+  async function enviarVarios(arquivos: FileList | File[]) {
+    for (const a of Array.from(arquivos)) await enviar(a);
+  }
+
+  async function enviar(arquivo: File) {
+    setEnviando(true);
+    setErro(null);
+    try {
+      const dados = new FormData();
+      dados.append("arquivo", arquivo);
+      dados.append("papel", papel);
+      if (personaId) dados.append("persona_id", personaId);
+      if (rotulo) dados.append("rotulo", rotulo);
+
+      const resp = await fetch("/api/olimpo/v1/media/upload", {
+        method: "POST", body: dados,
+      });
+      if (!resp.ok) {
+        const corpo = await resp.json().catch(() => ({}));
+        throw new Error(corpo.detail ?? `${resp.status} ${resp.statusText}`);
+      }
+      aoEnviar?.(await resp.json());
+    } catch (e) {
+      setErro(String(e).replace("Error: ", ""));
+    } finally {
+      setEnviando(false);
+      if (input.current) input.current.value = "";
+    }
+  }
+
+  return (
+    <div className="space-y-1">
+      <div
+        onClick={() => !enviando && input.current?.click()}
+        onDragOver={(e) => { e.preventDefault(); setSobre(true); }}
+        onDragLeave={() => setSobre(false)}
+        onDrop={(e) => {
+          e.preventDefault();
+          setSobre(false);
+          const fs = e.dataTransfer.files;
+          if (fs?.length) multiplo ? enviarVarios(fs) : enviar(fs[0]);
+        }}
+        className={`flex cursor-pointer items-center justify-center gap-2 rounded border border-dashed transition-colors ${
+          compacto ? "px-2 py-1.5 text-xs" : "px-3 py-6 text-sm"
+        } ${
+          sobre
+            ? "border-info bg-info/10 text-info"
+            : "border-surface-border text-slate-500 hover:border-slate-600 hover:text-slate-300"
+        } ${enviando ? "pointer-events-none opacity-60" : ""}`}
+      >
+        {enviando ? (
+          <><Loader2 size={compacto ? 12 : 16} className="animate-spin" /> enviando…</>
+        ) : (
+          children ?? (
+            <><Upload size={compacto ? 12 : 16} /> arraste ou clique para enviar</>
+          )
+        )}
+      </div>
+
+      <input
+        ref={input}
+        type="file"
+        accept="image/jpeg,image/png,image/webp,image/gif,image/heic,image/heif,.heic,.heif,video/mp4,video/quicktime,video/webm"
+        className="hidden"
+        multiple={multiplo}
+        onChange={(e) => {
+          const fs = e.target.files;
+          if (fs?.length) multiplo ? enviarVarios(fs) : enviar(fs[0]);
+        }}
+      />
+
+      {erro && (
+        <p className="flex items-start gap-1 text-xs text-red-300">
+          <AlertTriangle size={11} className="mt-0.5 shrink-0" /> {erro}
+        </p>
+      )}
+    </div>
+  );
+}
+

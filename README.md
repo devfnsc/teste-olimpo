@@ -1,3 +1,199 @@
-# Olimpo
+# 🏛️ Olimpo
 
-Código de demonstração em preparação.
+**Core de agentes sociais autônomos.** Dá vida, memória e agenda a contas de redes sociais, e coordena campanhas entre elas — executando tudo através de uma frota de Android real.
+
+> Cada conta é um agente com história própria. Ela acorda, olha o que viveu, decide o que postar hoje, produz o conteúdo, publica através de um device real e reflete sobre o dia. O manager emite campanhas; cada agente as traduz pela própria realidade.
+
+---
+
+## Onde o Olimpo se encaixa
+
+O Olimpo é **o cérebro**. Ele não fala com o Instagram nem gera imagem — ele decide *o quê, quando e por quê*, e orquestra os serviços que já existem:
+
+| Serviço | Papel | Repositório |
+|---|---|---|
+| **android-orchestrator** | Executa e **verifica** ações em device real | `chrisvalezi/android-orchestrator` |
+| **android-manager** | Frota de containers redroid | `chrisvalezi/android-manager` |
+| **media-forge** | Cortes e edição de vídeo — *a construir (Fase 5)* | — |
+
+A **máquina de influencers** era o quarto serviço e foi absorvida: persona,
+identidade visual e geração de imagem e vídeo agora vivem aqui dentro
+([ADR-0014](docs/adr/0014-absorver-a-maquina-de-influencers.md)). Duas fontes
+de verdade para a mesma personagem não sobrevivem ao tempo.
+
+O core **nunca** chama a plataforma diretamente. Toda ação vira uma task despachada ao orchestrator, que confirma a execução. Essa separação é o ativo estratégico do projeto — ver [ADR-0001](docs/adr/0001-core-proprio.md).
+
+---
+
+## Início rápido
+
+```bash
+cp .env.example .env    # preencha as URLs dos seus serviços
+make up                 # sobe tudo (postgres, redis, litellm, api, worker, painel)
+make seed               # cria uma influencer de exemplo
+make logs               # acompanha
+```
+
+| Serviço | URL |
+|---|---|
+| Painel | http://localhost:3000 |
+| API (docs) | http://localhost:8000/docs |
+| LLM Gateway | http://localhost:4000 |
+| Adminer (`make up-tools`) | http://localhost:8080 |
+| Grafana (`make up-obs`) | http://localhost:3001 |
+
+> **`DISPATCH_ENABLED=false` é o default.** Nada é enviado ao orchestrator: todas as ações são gravadas em `dryrun/`. É assim que se valida o loop sem arriscar uma conta. Ligue só quando a Fase 1 estiver validada.
+
+### Executar a API localmente sem Docker (WSL/Ubuntu)
+
+Para abrir a documentação da API durante o desenvolvimento, use Python 3.12 no Ubuntu/WSL, dentro da pasta do projeto:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e ".[dev]"
+bash scripts/run-local.sh
+```
+
+Depois abra http://127.0.0.1:8000/docs. Encerre com `Ctrl+C`. Esse modo inicia apenas a API, escuta somente no notebook e força o banco, Redis e integrações para endereços locais ou sem credenciais, sem enviar ações às contas nem usar os serviços configurados em `.env`. Sem PostgreSQL local, `/health` informa `degraded` e as rotas que consultam dados não estarão disponíveis. O worker e as filas também precisam de Redis. As gerações externas não ficam disponíveis nesse modo isolado; para avaliá-las sem chamadas reais, será necessário adicionar provedores simulados locais.
+
+### Executar no Windows (PowerShell)
+
+O painel e a API rodam como processos nativos do Windows. Instale Python 3.12+, Node.js 20+ e Docker Desktop. Abra o Docker Desktop e espere o mecanismo indicar que está em execução; se `docker info` retornar erro de conexão, o banco ainda não poderá iniciar. O banco usa a imagem `pgvector/pgvector` do Compose, que já inclui a extensão necessária; API e painel continuam fora dos containers. Crie `.env` somente se ainda não existir, ajuste `POSTGRES_PASSWORD` e inicie apenas o banco:
+
+```powershell
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }
+docker compose up -d postgres
+```
+
+O runner lê usuário, senha, banco e porta do `.env` para formar a conexão local. Ele recusa `DATABASE_URL` cujo host não seja `localhost`, evitando aplicar migrações no banco remoto por engano. O modo local mantém o despacho desativado e o interruptor geral ligado; do `.env`, só usa também as credenciais AppRunCloud para consultar inventário em modo de leitura.
+
+Para preencher a tela **AppRunCloud**, informe no `.env` `APPRUNCLOUD_API_KEY` e `APPRUNCLOUD_ORG_ID` usando uma chave com acesso de leitura e o UUID da organização. `APPRUNCLOUD_BASE_URL` pode ficar como `https://www.appruncloud.com`; o timeout padrão é 30 segundos. Salve o arquivo e reinicie a API para carregar os valores. Sem essas credenciais, o painel mostra “conexão não configurada” e continua funcionando com o banco local. O `.env` está excluído do Git; não publique chaves no repositório.
+
+Na primeira execução, aplique o schema:
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+./scripts/run-local.ps1 -MigrateOnly
+```
+
+Para preencher a tela principal com dados de demonstração locais, rode o seed
+fictício (idempotente; cria uma persona e uma conta ainda não vinculada a um
+dispositivo):
+
+```powershell
+./scripts/run-local.ps1 -SeedOnly
+```
+
+Em um PowerShell, inicie a API:
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+./scripts/run-local.ps1
+```
+
+Em outro PowerShell, inicie o painel:
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+./scripts/run-panel.ps1
+```
+
+Abra http://localhost:3000. O script do painel instala as dependências na primeira execução. Este modo local inicia API e painel; tarefas em segundo plano e filas Celery/Redis não são iniciadas por esses scripts.
+
+Se as portas padrão estiverem ocupadas, inicie cada processo em uma porta
+alternativa. Ao mudar a porta da API, informe a mesma origem ao runner do
+painel. Os runners verificam a porta antes de iniciar e informam claramente
+quando ela já está ocupada:
+
+```powershell
+./scripts/run-local.ps1 -Port 8001
+```
+
+Em outro PowerShell:
+
+```powershell
+$env:OLIMPO_API_URL = "http://127.0.0.1:8001"
+./scripts/run-panel.ps1 -Port 3003
+```
+
+---
+
+## Como funciona
+
+Todo agente — seja influencer, página de fofoca ou conta de clipagem — roda **o mesmo loop**. A única peça que muda é de onde vem o conteúdo:
+
+```
+PLAN ─▶ SOURCE ─▶ PRODUCE ─▶ QA ─▶ DISPATCH ─▶ VERIFY ─▶ RECORD ─▶ REFLECT
+         │
+         ├─ influencer → GeneratedSource  (geração própria — docs/13)
+         ├─ fofoca     → CuratedSource    (monitores 24/7 + ingestão)
+         └─ clipagem   → DerivedSource    (media-forge)
+```
+
+Persona, memória, campanhas, guardrails, despacho e métricas são compartilhados por todos. Ver [docs/05-loop-do-agente.md](docs/05-loop-do-agente.md).
+
+### Campanhas com reconhecimento
+
+Uma campanha de engajamento **não é planejada às cegas**. O fluxo obrigatório:
+
+```
+brief ─▶ RECON ─▶ análise ─▶ plano ─▶ espalhamento ─▶ execução
+         │         │
+         │         └─ LLM multimodal: do que se trata? é seguro? que ângulos?
+         └─ uma conta Android abre o conteúdo e extrai o que é
+```
+
+Só depois de *ver* o conteúdo o sistema decide quem participa e o que cada persona comenta. Ver [docs/06-campanhas.md](docs/06-campanhas.md).
+
+### Espalhamento anti-detecção
+
+N contas fazendo a mesma coisa na mesma janela é o sinal nº 1 de detecção de farm. `spread_policy` é **campo obrigatório** em toda campanha: jitter temporal, texto sempre único, participação parcial e respeito à cadência natural de cada conta. Ver [docs/06](docs/06-campanhas.md#5-espalhamento).
+
+---
+
+## Documentação
+
+Tudo vive em [`docs/`](docs/). Comece pelo [índice](docs/README.md).
+
+| | |
+|---|---|
+| **Conceito** | [Visão geral](docs/00-visao-geral.md) · [Arquitetura](docs/01-arquitetura.md) · [Glossário](docs/glossario.md) |
+| **Especificações** | [Modelo de dados](docs/02-modelo-de-dados.md) · [Persona Card](docs/04-persona-card-spec.md) · [Loop do agente](docs/05-loop-do-agente.md) |
+| **Subsistemas** | [Campanhas](docs/06-campanhas.md) · [Monitores 24/7](docs/07-monitores.md) · [LLM Gateway](docs/09-llm-gateway.md) · [Painel](docs/10-painel.md) · [Geração de mídia](docs/13-geracao-de-midia.md) · [Motores de prompt](docs/14-motores-de-prompt.md) |
+| **Operação** | [Guardrails](docs/08-guardrails-e-autonomia.md) · [Observabilidade](docs/11-observabilidade.md) · [Segurança](docs/12-seguranca.md) · [Runbooks](docs/runbooks/) |
+| **Integrações** | [Contratos de API](docs/contratos/) dos serviços existentes |
+| **Implantação** | [Render + Supabase](docs/implantacao-render-supabase.md) |
+| **Processo** | [Fases e handoffs](docs/fases/) · [Decisões (ADR)](docs/adr/) · [CHANGELOG](CHANGELOG.md) |
+
+---
+
+## Estado atual
+
+**Fase 0 — Fundação.** Ver [docs/fases/fase-0-fundacao.md](docs/fases/fase-0-fundacao.md) para o handoff completo e os critérios de saída.
+
+O roadmap vai até a Fase 6. Influencers primeiro (Fases 1–3), fofoca depois (Fase 4), clipagem em seguida (Fase 5). Cada fase tem um documento de handoff com escopo, critérios de saída, riscos e o que fica dormente.
+
+---
+
+## Comandos
+
+```bash
+make up          # sobe a stack
+make down        # derruba (mantém volumes)
+make logs        # logs de tudo
+make migrate     # aplica migrações pendentes
+make seed        # dados de exemplo
+make test        # testes
+make lint        # ruff + mypy
+make shell       # shell no container da api
+make psql        # psql no banco
+make reset       # ⚠️ apaga volumes e recria do zero
+```
+
+---
+
+## Licença
+
+Proprietário — uso interno. Ver [LICENSE](LICENSE).
+

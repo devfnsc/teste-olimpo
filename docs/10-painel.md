@@ -1,0 +1,703 @@
+Warning: truncated output (original token count: 21154)
+Total output lines: 1025
+
+# 10 — Painel
+
+> **Status:** especificação · **Implementação:** mínima na Fase 0, aprovação na Fase 1, campanhas na Fase 3, monitores na Fase 4
+> **Código:** `panel/` · **Container:** serviço `panel` do `docker-compose.yml` · **URL:** http://localhost:3000
+
+O painel é a única interface humana do Olimpo. Tudo o que um operador precisa fazer — aprovar, pausar, matar, promover, revisar campanha, entender uma decisão — acontece aqui. Não existe "console de admin" paralelo: o que não está no painel só existe via `psql`, e isso é considerado uma lacuna, não um recurso.
+
+## Implementação visível nesta demonstração
+
+As rotas abaixo são as telas presentes hoje no painel. O restante deste
+documento descreve a experiência planejada do produto e não significa que
+todas as funções estejam implementadas ou habilitadas.
+
+| Rota | Tela | Estado atual |
+|---|---|---|
+| `/` | Visão geral | Resumo de contas, personas, servidores, dispositivos e conexão de inventário. Consulta em leitura. |
+| `/contas` | Contas | Busca, filtros, paginação e administração local de contas. |
+| `/contas/[id]` | Ficha da conta | Dados do login, persona vinculada, inventário, posição e observações. O seletor indica a ocupação `n/2` e desabilita personas lotadas; a API valida o limite ao salvar. |
+| `/personas` | Personas | Lista, busca e cadastro de identidades. |
+| `/personas/[id]` | Ficha da persona | Dados e contas vinculadas; exibe o limite de duas contas. |
+| `/servidores` | Servidores | Consulta de hosts, serviços e dispositivos. Cadastro e sondagem não estão habilitados pelo proxy local desta demonstração. |
+| `/servidores/[id]` | Detalhe do servidor | Dispositivos e informações reportadas pelo host. |
+| `/integracoes/appruncloud` | Inventário AppRunCloud | Consulta de instâncias em leitura, busca, paginação e detalhes sob demanda. |
+| `/midias` | Mídias | Biblioteca paginada de arquivos visuais existentes e estado do catálogo de provedores. O cartão de provedores é informativo e não inicia geração. |
+| `/estudio` | Redirecionamento | Leva para a lista de personas ou para uma ficha indicada pelo parâmetro `persona`. |
+| `/login` | Acesso | Tela de senha usada no ambiente de produção. |
+
+O proxy do painel aceita somente `GET` para a AppRunCloud, tanto localmente
+quanto em produção. A listagem enriquece até seis instâncias por consulta;
+detalhes de outras instâncias são buscados individualmente quando solicitados.
+No deploy de demonstração em produção, o proxy recusa métodos de escrita. Os
+scripts locais permitem somente as operações administrativas documentadas em
+[implantacao-render-supabase.md](implantacao-render-supabase.md).
+
+---
+
+## 1. Princípios de design
+
+### 1.1 É uma sala de controle, não um CMS
+
+Um CMS te pergunta "o que você quer criar hoje?". Uma sala de controle te informa **o que está acontecendo e o que exige você**. O Olimpo produz conteúdo sozinho; o humano não é autor, é supervisor. O painel reflete isso: a tela inicial não tem botão "novo post" em destaque — tem uma fila de aprovação e um feed de eventos.
+
+### 1.2 A hierarquia de atenção
+
+Toda tela responde, nesta ordem:
+
+| Prioridade | Pergunta | Como aparece |
+|---|---|---|
+| **1** | O que precisa da minha atenção **agora**? | Topo da tela, alto contraste, contagem exata. Fila de aprovação, alertas, guardrails `block`/`kill`, contas em `suspended`, monitores em `error`. |
+| **2** | O que o sistema está fazendo **neste momento**? | Tasks em voo, campanhas `running`, monitores checando, workers ocupados. Atualização ao vivo, sem refresh. |
+| **3** | **Por que** ele decidiu isso? | Sempre a um clique. `day_plans.reasoning`, `content_items.reasoning`, `campaign_recon.analysis`, `campaign_participants.local_adaptation`, e a trilha em `events` por `trace_id`. |
+
+Nada que não responda a uma dessas três perguntas merece espaço acima da dobra.
+
+### 1.3 Densidade alta, zero enfeite
+
+- Tabelas densas, linhas de 32–36 px, tipografia de 13 px no corpo de dados. Um operador precisa ver 25 contas sem rolar.
+- Números sempre acompanhados da unidade e do recorte temporal ("18 tasks · últimas 24 h"), nunca soltos.
+- Sem card gigante com ícone decorativo, sem ilustração, sem carrossel, sem animação que não comunique estado.
+- Cor é **significado**, nunca decoração (ver §7). Se uma cor não codifica status, severidade ou autonomia, ela não entra.
+- Espaço em branco existe para separar grupos semânticos, não para "respirar".
+
+### 1.4 Toda decisão é auditável na interface
+
+O rastro que o ADR-0001 exige do backend precisa ser navegável na UI. Regra prática: **de qualquer artefato publicado dá para chegar em três cliques ao prompt/plano que o originou.** Post → `content_item` → `day_plan` → `events` com o mesmo `trace_id` → `llm_calls`.
+
+### 1.5 Estado destrutivo nunca é acidente
+
+Ver §8. Kill switch global, promoção de autonomia e aprovação de campanha exigem confirmação com digitação. Todo o resto é reversível ou tem desfazer.
+
+### 1.6 Rápido em volume
+
+A fila de aprovação é o gargalo humano do sistema em L0/L1. Ela precisa ser operável com as mãos no teclado, sem mouse, a uma taxa de ~1 item a cada 4 segundos quando o conteúdo é rotineiro.
+
+O mesmo vale para a lista de contas, por outro motivo: a operação real tem **milhares** de logins. Toda lista operacional em volume é **paginada e filtrada no banco**, com contagem total visível e ação em lote — nunca "traz tudo e filtra na tela", que derruba o navegador e some com o tempo de resposta.
+
+---
+
+## 2. Stack
+
+| Camada | Escolha | Por quê |
+|---|---|---|
+| Framework | **Next.js 15** (App Router, React Server Components) | Server Components buscam da API sem expor token ao browser; streaming de UI encaixa com listas grandes |
+| Linguagem | **TypeScript** estrito (`strict: true`, sem `any`) | Os tipos vêm do OpenAPI da FastAPI — erro de contrato aparece em build |
+| UI | **React 19** + **Tailwind CSS** + **shadcn/ui** (Radix) | Radix dá acessibilidade de teclado e foco de graça; shadcn é copiado para dentro do repo (sem dependência de versão) |
+| Dados (cliente) | **TanStack Query** | Cache, revalidação, mutação otimista, retry |
+| Formulários | **react-hook-form** + **zod** | O mesmo zod valida `persona_card` e `spread_policy` antes de mandar para a API |
+| Tabelas | **TanStack Table** | Virtualização, ordenação e filtro em listas de milhares de linhas |
+| Gráficos | **Recharts** | Sparkline de métrica e custo de LLM. Nada além disso |
+| Tempo real | **EventSource (SSE)** contra `GET /v1/events/stream` | Ver §6 |
+| Datas | **date-fns** + `date-fns-tz` | Conta tem `accounts.timezone`; o painel nunca assume o fuso do browser |
+| Testes | **Vitest** + **Testing Library** + **Playwright** | E2E cobre os fluxos destrutivos |
+| Runtime | Node 22, `output: 'standalone'` | Imagem final pequena |
+
+**Contrato de tipos.** `panel/src/lib/api/types.gen.ts` é gerado de `http://api:8000/openapi.json` via `openapi-typescript`, por `make panel-types`. Não se escreve tipo de resposta de API à mão. Enums do banco (`archetype`, `account_status`, `autonomy_level`, `task_status`, `content_status`, `claim_status`, `rights_status`, `campaign_status`, `monitor_status`, `memory_kind`) chegam como *string unions* e são a fonte da verdade para os mapas de cor.
+
+**Autenticação.** No blueprint de demonstração, `API_TOKEN` protege a FastAPI e fica no servidor; o browser fala com Route Handlers do Next (`/app/api/**`), que fazem proxy para a API e injetam o token. O painel exige `PANEL_ACCESS_PASSWORD` em produção e mantém a sessão em cookie `HttpOnly`. `OLIMPO_API_URL` é configuração server-side e não vai no bundle do navegador. Multiusuário com papéis entra junto com a Fase 5 (multi-tenant, `clients`).
+
+---
+
+## 3. Organização de pastas
+
+```
+panel/
+├── Dockerfile                      # multi-stage; dev usa `next dev`, prod `next start`
+├── next.config.ts
+├── tailwind.config.ts
+├── components.json                 # config do shadcn/ui
+└── src/
+    ├── app/
+    │   ├── layout.tsx              # shell: sidebar, topbar, provedores, tema escuro
+    │   ├── page.tsx                # (1) Visão geral — sala de controle
+    │   ├── contas/
+    │   │   ├── page.tsx            # (2) tabela densa: busca, facetas, lote
+    │   │   └── [id]/
+    │   │       ├── page.tsx        # ficha do login: identidade, perfil, onde roda, notas
+    │   │       ├── memoria/page.tsx
+    │   │       ├── agenda/page.tsx
+    │   │       ├── posts/page.tsx
+    │   │       └── tasks/page.tsx
+    │   ├── personas/
+    │   │   ├── page.tsx            # (2b) identidades + logins vinculados
+    │   │   └── [id]/page.tsx       # editor do card: modo guiado e modo JSON
+    │   ├── aprovacoes/page.tsx     # (3) fila de aprovação
+    │   ├── campanhas/
+    │   │   ├── page.tsx            # (4) lista
+    │   │   ├── nova/page.tsx       # wizard de criação
+    │   │   └── [id]/
+    │   │       ├── page.tsx        # timeline de execução
+    │   │       ├── recon/page.tsx  # bruto × análise, lado a lado
+    │   │       └── plano/page.tsx  # participantes, slots, adaptações
+    │   ├── monitores/
+    │   │   ├── page.tsx            # (5)
+    │   │   └── [id]/page.tsx
+    │   ├── conteudo/
+    │   │   ├── page.tsx            # (6) biblioteca
+    │   │   └── [id]/page.tsx
+    │   ├── interacoes/page.tsx     # (7)
+    │   ├── servidores/
+    │   │   ├── page.tsx            # (10) hosts, serviços, contas descobertas
+    │   │   └── [id]/page.tsx       # devices do host + telas ao vivo
+    │   ├── observabilidade/
+    │   │   ├── page.tsx            # (8) tasks + filas
+    │   │   ├── llm/page.tsx
+    │   │   └── guardrails/page.tsx
+    │   ├── configuracoes/page.tsx  # (9)
+    │   └── api/                    # Route Handlers: proxy + SSE relay
+    │       ├── [...proxy]/route.ts
+    │       └── stream/route.ts
+    ├── components/
+    │   ├── ui/                     # shadcn puro, não editado à mão
+    │   ├── domain/                 # os 10 componentes de domínio (§5)
+    │   └── layout/                 # Sidebar, Topbar, KillSwitchBar, CommandPalette
+    ├── lib/
+    │   ├── api/                    # client, types.gen.ts, hooks por recurso
+    │   ├── realtime/               # useEventStream, reconciliação de cache
+    │   ├── format/                 # números, datas por accounts.timezone, durações
+    │   ├── domain/                 # mapas enum → rótulo PT, cor, ícone e explicação
+    │   └── keys.ts                 # atalhos de teclado, registro único
+    └── styles/globals.css          # tokens do design system
+```
+
+**Regra de camadas.** `components/ui` não conhece o domínio. `components/domain` não faz fetch — recebe dados por props. Fetch vive em Server Components ou em hooks de `lib/api`. Isso mantém o Storybook e os testes triviais.
+
+---
+
+## 4. Mapa de telas
+
+Convenção das tabelas abaixo: **endpoint** é o contrato da FastAPI; **tabelas** são as de `db/migrations/` — `0001_initial.sql` para o núcleo e `0005_servers_and_services.sql` / `0006_account_inventory.sql` para a tela de Servidores (§4.10).
+
+---
+
+### 4.1 Visão geral — a sala de controle
+
+`/` — a tela que fica aberta o dia inteiro em um monitor.
+
+**Propósito.** Em cinco segundos responder: a frota está bem? tem alguém esperando por mim? o que está rodando agora? quanto isso está custando?
+
+**Layout.** Três faixas horizontais, sem rolagem para as duas primeiras em 1440×900.
+
+```
+┌─ FAIXA 1 — atenção ──────────────────────────────────────────────────┐
+│  [!] 7 aguardando aprovação   [!] 2 guardrails block (1h)             │
+│  [!] 1 conta suspended        [!] 1 monitor em error (12 falhas)      │
+├─ FAIXA 2 — estado ───────────────────────────────────────────────────┤
+│ Frota      Contas por status     Em voo          LLM hoje            │
+│ 12/14 ok   ▮active 9 ▮warm 2     18 tasks        US$ 1,84 / 5,00     │
+│ devices    ▮paused 2 ▮susp 1     3 campanhas     412 chamadas        │
+├─ FAIXA 3 — o que está acontecendo ───────────────────────────────────┤
+│  [ Timeline ao vivo de eventos ]     │  [ Próximas 2h: agenda ]      │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+| Componente | Dados | Origem |
+|---|---|---|
+| `AlertStrip` | contagens acionáveis; cada uma é link para a tela filtrada | `GET /v1/overview` → `approvals` abertas (`idx_approvals_open`), `guardrail_violations` com `severity IN ('block','kill')` na última hora, `accounts.status='suspended'`, `monitors.status='error'` |
+| `FleetHealthCard` | devices saudáveis / total, containers redroid caídos | `GET /v1/fleet/health` (proxy somente leitura do **android-manager**) |
+| `AccountStatusBreakdown` | barra segmentada por `account_status`, clicável | `GET /v1/overview` → `accounts` agrupadas por `status` |
+| `InFlightPanel` | tasks `dispatched`/`running` com idade; campanhas `running`; monitores devidos | `tasks` (`idx_tasks_inflight`), `campaigns.status='running'`, `monitors.next_check_at <= now()` |
+| `LlmBudgetGauge` | gasto do dia vs. `LLM_DAILY_BUDGET_USD`, split por `backend` | `GET /v1/llm/usage?window=today` → `llm_calls.cost_usd` agrupado por `backend` |
+| `LiveEventFeed` | últimos eventos, filtro por tipo e conta | SSE `GET /v1/events/stream` + seed de `GET /v1/events?limit=100` → `events` |
+| `UpcomingSchedule` | tasks `pending`/`scheduled` nas próximas 2 h, por conta, no fuso da conta | `tasks.scheduled_for` (`idx_tasks_due`) + `accounts.timezone` |
+| `KillSwitchBar` | barra fixa vermelha quando `GLOBAL_KILL_SWITCH=true` ou `DISPATCH_ENABLED=false` | `GET /v1/settings/runtime` |
+
+**Ações.** Ir para a fila de aprovação · abrir conta · abrir campanha · pausar conta direto do breakdown · acionar kill switch global (§8) · filtrar o feed.
+
+> **Banner de dry-run.** Quando `DISPATCH_ENABLED=false`, uma faixa âmbar permanente diz *"Dry-run: nada está sendo despachado ao orchestrator. Ações são gravadas em `media/dryrun/`."* Ela não é dispensável. Um operador jamais deve confundir simulação com produção.
+
+---
+
+### 4.2 Contas e personas
+
+> **Uma conta é um login numa plataforma; a persona é a identidade por trás dela e pode ter até duas contas** ([ADR-0013](adr/0013-persona-separada-da-conta.md), [ADR-0015](adr/0015-limite-duas-contas-por-persona.md)). São duas telas porque são duas coisas, e cada uma responde a uma pergunta diferente: *"onde está esse login e ele está operando?"* × *"quem é essa personagem?"*.
+
+**O princípio que manda nesta tela: com quatro mil contas, cartão não serve.** Uma grade de cartões bonitos é ótima para vinte contas e inútil para quatro mil — não cabe na tela, não carrega no navegador e não deixa agir sobre um conjunto. O que o operador precisa é **varrer, filtrar e agir em lote**: tabela densa, paginada no servidor, com facetas contadas no banco e seleção múltipla. É a mesma lógica de §1.3 e §1.6, levada ao caso em que o volume é a dificuldade principal.
+
+#### Lista — `/contas`
+
+**Propósito.** Achar um login entre milhares, entender o estado da frota linha a linha e agir sobre um conjunto de uma vez.
+
+**Paginada no banco, nunca na tela.** `GET /v1/accounts` devolve uma página (`page`, `per_page` até 500, default 50), o total e o número de páginas. Trazer tudo e filtrar no cliente derruba o navegador e some com o tempo de resposta — e é o erro que esta tela existe para não cometer.
+
+**Busca.** Um campo só, que procura em quatro lugares: `handle` (índice trigrama, busca "contém" — o operador digita pedaço, não prefixo), `external_id` exato, `jid` (telefone do WhatsApp) e **nome da persona**. Achar a conta pelo nome da personagem é o caminho natural quando se sabe quem, não qual login.
+
+**Facetas clicáveis, contadas no banco.** Acima da tabela, uma linha por eixo, com a contagem de cada valor:
+
+```
+plataforma   [IG 2891] [WA 940] [TT 173]
+situação     [cadastrada 1204] [ativa 1902] [aquecendo 611] [pausada 190] [perdida 97]
+presença     [em device 1740] [sem sinal 402] [sumida 118] [sem device 1744]
+papel        [agente 3388] [coletora 511] [utilitária 105]
+sem persona  [ 862 sem identidade vinculada ]
+```
+
+As contagens vêm **sem filtro aplicado**, numa única consulta agregada: são o mapa da operação inteira, e é a partir delas que o operador decide o que olhar primeiro. Clicar alterna o filtro; clicar de novo remove.
+
+| Filtro | Campo |
+|---|---|
+| Plataforma | `accounts.platform` |
+| Situação | `accounts.status` (registered · warming · active · paused · suspended · lost) |
+| Presença | calculada dos placements (online · stale · missing · unbound) — [docs/02 § 3.35](02-modelo-de-dados.md#335-situação-e-presença-dois-eixos-ortogonais) |
+| Papel | `accounts.role` (agent · collector · utility) |
+| Arquétipo | `accounts.archetype` (influencer · gossip · clipper · messaging · collector) |
+| Autonomia | `accounts.autonomy` (L0–L3) |
+| Rótulo | `accounts.labels` (índice gin) |
+| Persona | `accounts.persona_id`, e o atalho `unbound` para "sem identidade vinculada" |
+| Cliente | `accounts.client_id` → `clients.name` *(oculto até a Fase 5)* |
+| Busca | `q` sobre handle (trigrama), `external_id`, `jid` e nome da persona |
+
+Colunas: **conta** (badge de plataforma + handle + marcador de observações, com arquétipo e papel na segunda linha) · **persona** (ou *sem persona*, em cinza) · **situação** · **presença** (com `×N` quando o login está em mais de um device) · seguidores · autonomia · **visto** (`last_seen_in_inventory`, relativo).
+
+**Situação e presença são duas colunas de propósito.** Uma diz o que queremos; a outra, o que a realidade responde. Ver uma conta `ativa` e `sumida` na mesma linha é exatamente o que faz o operador agir — e é informação que um campo só apagaria.
+
+**Ordenação:** handle · seguidores · criação · último visto · situação. Feita no banco, junto com a paginação.
+
+**Seleção múltipla e ações em lote.** Caixa por linha e caixa no cabeçalho (marca a página inteira). Com algo selecionado, aparece uma barra com a contagem e as ações: mudar situação · mudar papel · vincular à persona · desvincular · adicionar rótulos · remover rótulos · mudar autonomia. Teto de **2000 ids** por chamada.
+
+> **O que NÃO entra no lote:** apagar (§8, e nem existe no endpoint) e promoção de autonomia sem confirmação por conta. Rebaixar em massa é contenção e é legítimo; promover em massa é abrir mão da supervisão de 500 contas com um clique.
+
+**Cadastrar conta é o primeiro passo, não o último.** `Nova conta` pede plataforma, handle, papel e (opcionalmente) persona. **O login é cadastrado antes de existir em qualquer device** — o vínculo com o container aparece sozinho quando o inventário o encontrar. Era a ordem impossível no modelo antigo, em que a conta só existia se um device a revelasse. O arquétipo é validado contra a plataforma (WhatsApp aceita `messaging`/`collector`; Instagram e TikTok, os de conteúdo).
+
+`GET /v1/accounts?q=&platform=&status=&role=&archetype=&autonomy=&presence=&label=&persona_id=&unbound=&sort=&page=&per_page=` · `POST /v1/accounts` · `POST /v1/accounts/bulk`
+
+#### Ficha da conta — `/contas/[id]`
+
+Tudo sobre um login. Cabeçalho com badge de plataforma, handle, presença, `external_id`, idade e — quando houver — a linha *"já se chamou: …"* vinda de `previous_handles`.
+
+| Bloco | Conteúdo |
+|---|---|
+| **Identidade e operação** | handle · **persona vinculada** (select, com a opção explícita *"— sem identidade vinculada —"*) · situação · autonomia · papel · arquétipo · `external_id` · telefone/JID (só WhatsApp) · rótulos · fuso |
+| **Inventário** | seguidores, seguindo, publicações — com o aviso de que vêm da varredura, não de digitação |
+| **Dados da conta** | `accounts.profile`: e-mail, e-mail de recuperação, telefone, nascimento, criada em, origem, proxy, geo, 2FA — **campos sugeridos, não schema fechado**; chaves extras são aceitas e editáveis |
+| **Onde está a credencial** | `accounts.secret_ref`, em bloco próprio com ícone de chave: *"referência ao cofre, não a senha em si — esta coluna não é cifrada"* |
+| **Onde esta conta roda** | os `account_placements`: servidor, container, usuário Android, logada/deslogada, aviso de watchdog, idade do último avistamento. Sem placement, o texto diz que a conta existe normalmente e só não tem onde operar |
+| **Observações** | `entity_notes` datadas, com autor e fixação. Diferente do campo de anotação livre acima: aqui nada é sobrescrito |
+| **Zona de risco** | apagar a conta e todo o histórico, em bloco separado com borda vermelha |
+
+**Faixa de presença.** Quando `presence = 'missing'`, uma faixa âmbar no topo diz em texto: *"Esta conta não aparece no inventário há mais de um dia. **Ela não foi perdida** — o cadastro, a persona e o histórico continuam aqui. O que sumiu foi o login dentro do device."* É a resposta à pergunta que o operador faz, no lugar em que ele a faz.
+
+**Zona de risco, e por que ela é feia de propósito.** Apagar cascateia conteúdo, posts, tasks e aprovações. O botão exige digitação (`apagar`) e a API recusa sem `confirm=apagar-de-verdade`, respondendo com a alternativa correta: **conta banida deve virar `perdida`** — o histórico é o que explica por que ela caiu. Ver §8.
+
+**Campos livres com formulário guiado.** `profile` é `jsonb` sem schema porque cada operação tem seus campos; o painel oferece os nove mais comuns e deixa acrescentar quaisquer outros. É a única forma de o formulário não virar migração toda semana.
+
+`GET /v1/accounts/{id}` (conta + placements com servidor/container/device + observações + últimas tasks) · `PATCH /v1/accounts/{id}` · `POST /v1/accounts/{id}/notes` · `DELETE /v1/notes/{id}` · `DELETE /v1/accounts/{id}?confirm=apagar-de-verdade`
+
+> **Desvincular persona precisa de campo próprio.** Em `PATCH`, `null` significa *"não mexer"* — não *"apague o vínculo"*. Por isso o corpo tem `unbind_persona: true` como campo separado. É detalhe de contrato, e é o tipo de coisa que, sem estar escrita, vira um bug de "não consigo tirar a persona errada dessa conta".
+
+> **Trocar o handle empilha o anterior** em `previous_handles`. A conta não sumiu, ela se renomeou — e concluir o contrário é como se perde histórico.
+
+#### Personas — `/personas`
+
+**Propósito.** A identidade, separada do login. A Luna Prado existe mesmo que nenhuma conta exista, e o Instagram e o WhatsApp dela são a **mesma** personagem, com uma memória só.
+
+Um cartão por persona — e aqui cartão **cabe**, porque personas são dezenas, não milhares. Cada um mostra **o rosto** (a âncora `face`), nome, `slug`, nicho principal do card, contagem de memórias, arco ativo, e a lista de **logins vinculados** (badge de plataforma, handle, situação, seguidores), cada um linkando para a ficha da conta.
+
+**A lista mostra o rosto porque a lista é sobre pessoas.** Uma grade de nomes obriga a abrir cada ficha para saber de quem se está falando; a miniatura resolve isso em um relance. Persona sem âncora de rosto aparece com o lugar vazio marcado — e o vazio é informação, não falta de polimento.
+
+| Elemento | O que mostra |
+|---|---|
+| Miniatura | `personas.face_asset_id` → `GET /v1/media/{id}/arquivo`. Sem âncora, placeholder marcado |
+| Busca | por nome da persona |
+| Aviso de card vazio | faixa âmbar: *"Sem persona card. Sem ele a LLM não tem voz para escrever — a conta não deve sair de L0"* |
+| Sem logins | *"nenhum login vinculado"* — persona cadastrada e ainda sem conta é estado válido |
+| `Nova persona` | nome, `slug` (derivado do nome se vazio), descrição, rótulos, observações |
+
+> ⚠️ **A miniatura vem em tamanho cheio.** Não existem thumbnails ([docs/13 § 9](13-geracao-de-midia.md#9-o-que-não-existe)); uma lista de 40 personas baixa 40 originais. Enquanto personas são dezenas, isso é aceitável — quando forem centenas, deixa de ser.
+
+`GET /v1/personas?q=` · `POST /v1/personas` · `POST /v1/personas/{id}/notes` · `GET /v1/media/{id}/arquivo`
+
+#### Editor da persona — `/personas/[id]`
+
+**A ordem da página é decisão, não acaso.** Identidade visual primeiro, fora de qualquer aba; o resto — Mídias, Figurinos, Ficha, Logins — em abas abaixo. É a organização da máquina de influencers, e o motivo é a §1.2: as quatro âncoras são o que define quem a personagem *é*, e antes ficavam espremidas entre um formulário e dezenas de campos de persona card, com a galeria de mídias no rodapé, depois de tudo.
+
+As abas não são só arrumação de tela: **o conteúdo da aba inativa não é montado**. Numa persona com centenas de mídias, montar tudo dispara todas as requisições de uma vez.
+
+| Bloco | Onde | Por quê |
+|---|---|---|
+| Identidade visual | topo, fixo | é o que se olha antes de tudo, e o que precisa estar à mão enquanto se mexe no resto |
+| Fotos de referência | logo abaixo, fixo | sem rosto elas não salvam nada; com rosto melhoram toda geração |
+| Estúdio · Mídias · Figurinos · Ficha · Logins | abas | campos demais para empilhar |
+
+**O estúdio virou aba.** Era uma página própria (`/estudio`) com um seletor de personas no topo, e isso invertia a relação: a persona é o sujeito, a foto é o que se faz com ela. Escolher a personagem numa tela separada obrigava a sair da ficha, perder o contexto das âncoras e dos figurinos, e voltar. A rota antiga continua existindo como **redirecionamento** — `/estudio?persona=<id>` era o que a tela gerava a cada troca, então está no histórico de quem usou, e um 404 não ensina para onde foi.
+
+O card em dois modos, alternáveis por um botão, editando o **mesmo** objeto.
+
+| Modo | Para quem | Como funciona |
+|---|---|---|
+| **Guiado** | quem está escrevendo a personagem | Blocos com rótulo em português e texto de ajuda dizendo *por que* o campo existe — identidade, voz, visual, nicho, tabus. Listas viram uma linha por item; textos longos viram área |
+| **JSON** | quem já conhece a spec | O card inteiro, cru, com validação de sintaxe antes de salvar. O modo guiado cobre os blocos mais editados; **o resto do card continua acessível só por aqui** |
+
+Alternar entre os modos preserva o conteúdo: sair do JSON reinterpreta o texto; entrar no JSON serializa o que o modo guiado montou. JSON inválido bloqueia o salvamento com a mensagem do parser, em vez de gravar pela metade.
+
+**Salvar o card incrementa a versão.** `PATCH /v1/personas/{id}` com `persona_card` incrementa `personas.persona_version` e grava o snapshot em `persona_versions` — *"por que ela mudou de voz?"* precisa continuar respondível ([docs/04 § 5](04-persona-card-spec.md#5-versionamento)). A ficha também lista os logins vinculados, os arcos e as observações da persona.
+
+`GET /v1/personas/{id}` (persona + contas + arcos + observações) · `PATCH /v1/personas/{id}`
+
+> ❓ O editor ainda **não** exige `change_note` nem mostra diff lado a lado das versões, que a spec de persona pede. O histórico é gravado; a interface para lê-lo ainda não existe.
+
+#### Identidade visual — bloco da ficha da persona
+
+> Migração 0008 · [ADR-0014](adr/0014-absorver-a-maquina-de-influencers.md) · mecanismo em [docs/13 § 3](13-geracao-de-midia.md#3-consistência-facial--as-quatro-coisas-frágeis)
+
+A ficha da persona ganhou um bloco que **não é uma galeria**: são as quatro imagens que ancoram o rosto da personagem, mostradas **na ordem em que entram no prompt**, com a numeração visível.
+
+```
+Identidade visual                                        3 de 4 âncoras
+
+┌──────────────┐ ┌──────────────┐ ┌──────────────┐ ┌──────────────┐
+│              │ │              │ │              │ │      —       │
+│   [ rosto ]  │ │  [ folha ]   │ │  [ close ]   │ │   ausente    │
+│              │ │              │ │              │ │              │
+├──────────────┤ ├──────────────┤ ├──────────────┤ ├──────────────┤
+│ @image1      │ │ @image2      │ │ @image3      │ │ @image4      │
+│ rosto        │ │ folha de     │ │ close de     │ │ cartela de   │
+│              │ │ personagem   │ │ rosto        │ │ detalhe      │
+└──────────────┘ └──────────────┘ └──────────────┘ └──────────────┘
+```
+
+| Elemento | O que mostra | Por quê |
+|---|---…6154 tokens truncated…ule`, `severity` (info · warn · block · kill) e `action_taken` (blocked · flagged · suspended). Recorte por conta e por arquétipo — a taxa de violação por conta é o principal insumo para promover ou rebaixar autonomia.
+
+Tabela: `guardrail_violations`. `GET /v1/guardrails/violations`.
+
+---
+
+### 4.9 Configurações
+
+`/configuracoes` — políticas globais. Tela deliberadamente feia e cheia de avisos.
+
+| Grupo | Controles | Origem |
+|---|---|---|
+| **Interruptores mestres** | `GLOBAL_KILL_SWITCH`, `DISPATCH_ENABLED` | `.env` / runtime; **confirmação dupla** |
+| **Tetos de gasto** | `LLM_DAILY_BUDGET_USD`, comportamento ao estourar (cortar vs. só alertar) | `llm_calls` acumulado |
+| **Anti-detecção** | `CAMPAIGN_JITTER_MIN_MINUTES`, `CAMPAIGN_JITTER_MAX_MINUTES`, `CAMPAIGN_MAX_PARTICIPATION`, `ACCOUNT_MAX_ACTIONS_PER_HOUR` | defaults de `spread_policy` e do dispatcher |
+| **Amostragem** | `L2_SAMPLING_RATE` | fração de `approvals.sampled` em L2 |
+| **Guardrails globais** | temas proibidos, blacklist de alvos, exigência de `claim_status` por arquétipo | `docs/08` |
+| **Integrações** | URLs e saúde de orchestrator, máquina de influencers, android-manager, media-forge — só leitura, com teste de conectividade | `.env`, `GET /v1/health/integrations` |
+
+Toda mudança aqui emite um evento em `events` com o autor. Não existe alteração silenciosa de política.
+
+---
+
+### 4.10 Servidores
+
+`/servidores` — o índice que nenhum serviço tem.
+
+**Propósito.** Um servidor é um **host**; nele rodam vários serviços — o orchestrator que executa, o android-manager que gerencia a frota, o gateway que transmite as telas. Nenhum deles conhece os outros, e nenhum conhece a frota inteira ([ADR-0012](adr/0012-servidor-com-varios-servicos.md)). Esta tela responde: quais hosts existem, o que roda em cada um, o que está no ar, quantos devices estão vivos e **quais contas estão logadas lá que o Olimpo ainda não conhece**.
+
+#### Lista — `/servidores`
+
+Um cartão por servidor. Recarrega sozinho a cada 20 s.
+
+```
+┌─ i9-14900k                                    [ativo]  [gpu]  ──────────┐
+│  host i9-14900k.taila41397.ts.net   tailscale 100.x.x.x                  │
+│                                        [ sondar ] [ varredura completa ] │
+├──────────────────────────────────────────────────────────────────────────┤
+│  serviços 3/3      devices 6/8      contas online 11   sincronia há 2min  │
+├─ Serviços ───────────────────────────────────────────────────────────────┤
+│  [Orchestrator]     http://…:8078        41ms   no ar              ↗      │
+│  [Android Manager]  https://…/api    🔓  88ms   no ar              ↗      │
+│  [Gateway de tela]  https://…:9000       —      não sondado        ↗      │
+├──────────────────────────────────────────────────────────────────────────┤
+│  ⚠ 3 contas logadas que o Olimpo não conhece      [ importar todas ]      │
+├──────────────────────────────────────────────────────────────────────────┤
+│  📱 ver os 8 devices ›                                                    │
+└──────────────────────────────────────────────────────────────────────────┘
+```
+
+| Elemento | O que mostra | Endpoint / tabelas |
+|---|---|---|
+| Cabeçalho | nome, `server_status`, `labels`, e os **três endereços** (`hostname`, `tailscale_ip`, `lan_ip`) em fonte monoespaçada | `GET /v1/servers` → `servers` |
+| Métricas | serviços online/total · devices vivos/total · contas logadas · idade da última sincronia com contas encontradas e duração | `server_services`, `devices`, `account_placements`, `inventory_syncs` (a mais recente) |
+| Linha de serviço | tipo com cor própria, `label`, `base_url`, **badge de TLS**, latência, status com `last_error` no tooltip, **link ↗ para a interface** e remoção | `server_services` |
+| Contas descobertas | contas logadas nos devices que **não existem** em `accounts`, com plataforma, seguidores e em quais containers aparecem | `GET /v1/servers/{id}/discovered` |
+| Rodapé | link para o detalhe do servidor; erro da última sincronia quando houver | `GET /v1/servers/{id}/devices` |
+
+**Badge de TLS.** Todo serviço `https://` mostra um cadeado: **fechado verde** quando `verify_tls = true`, **aberto âmbar** quando não. Certificado autoassinado é a regra em rede interna e desligar a verificação é uma decisão legítima — mas é **por serviço** e precisa ficar visível, não escondida no banco. Serviço em `http://` não mostra cadeado nenhum: não há o que afirmar.
+
+**Sondagem é por serviço, não por host.** `sondar` bate em todos os serviços habilitados **em paralelo** e cada um responde por si — um android-manager sem credencial não derruba a leitura do orchestrator do mesmo servidor. O status do host é derivado do pior dos serviços, e o cartão sempre mostra os dois níveis. `varredura completa` (`?refresh=true`) força o nó a revisitar cada device: custa cerca de 90 s e por isso **nunca** é o comportamento padrão — é um segundo botão, com aviso no `title`.
+
+**Estado `credencial inválida` tem cor própria.** `401`/`403` não são "fora do ar": o operador conserta credencial, não infraestrutura. Confundir os dois faz reiniciar serviço saudável.
+
+**Contas descobertas.** A varredura do orchestrator encontra contas logadas nos devices que o Olimpo não tem cadastradas. A faixa âmbar oferece importar (todas ou selecionadas). Contas importadas nascem em `registered`/`L0` e **sem persona vinculada**, já ligadas ao device e com o inventário real (`external_id`, seguidores, seguindo, publicações, `jid`) — **existem e não agem** até alguém decidir de quem elas são e liberá-las. Elas aparecem na faceta *sem identidade vinculada* da tela de Contas (§4.2), que é onde essa pendência fica visível em vez de se perder.
+
+**Cadastro.** `Novo servidor` pede nome e endereços; `+ serviço` pede tipo, URL, credencial e TLS, com **sugestões por tipo** (porta, esquema, caminho de saúde, dica). Duas travas: a API recusa orchestrator apontando para `:8077` (é o executor — quem fala com ele tem root no host), e o formulário avisa que o android-manager **não tem chave de API**, só usuário e senha.
+
+`GET|POST /v1/servers` · `PATCH|DELETE /v1/servers/{id}` · `POST /v1/servers/{id}/services` · `PATCH|DELETE /v1/servers/services/{id}` · `POST /v1/servers/{id}/probe[?refresh=true]` · `GET /v1/servers/{id}/discovered` · `POST /v1/servers/{id}/import`
+
+#### Detalhe do servidor — `/servidores/[id]`
+
+Os devices daquele host, em grade de cartões, e o lugar onde o monitoramento de tela vai morar.
+
+| Elemento | Conteúdo |
+|---|---|
+| Cartão de device | `container`, versão do Android, `adb_target`, `video_device`, vivo/parado, idade de `last_seen_at` |
+| Contas no device | handle, plataforma, `android_user`, e o marcador de **usuário ativo** |
+| Aviso de vigilância | faixa âmbar quando `under_external_management` — o watchdog do android-manager pode reiniciar este container |
+| Ações por device | `captura` (desabilitada até haver android-manager cadastrado no servidor) · `tela` (desabilitada sem gateway ou sem dispositivo de vídeo) |
+| `grade ao vivo` | todas as telas aptas lado a lado, com **teto explícito** de telas simultâneas |
+
+> ⚠️ **"usuário ativo" não é "está na tela".** O serviço reporta *usuário Android em execução*, e o Android mantém vários rodando ao mesmo tempo. Qual está em primeiro plano ninguém sabe. O rótulo diz o que o dado significa, não o que gostaríamos que significasse ([docs/02 § 3.31](02-modelo-de-dados.md#331-campos-novos-em-accounts-e-account_placements)).
+
+**Monitoramento de tela está desligado hoje, e a tela explica por quê.** A base já está montada — device com endereço ADB e dispositivo de vídeo, gateway cadastrável como serviço, link montado pela interface — mas o gateway ainda não existe do lado de lá. Em vez de esconder o recurso, a tela mostra o estado real:
+
+| Situação | O que aparece |
+|---|---|
+| Nenhum gateway cadastrado no servidor | Faixa neutra: *"Transmissão de tela não configurada. A interface já está pronta; falta o endereço."* |
+| Gateway cadastrado, nenhum device apto | Faixa âmbar explicando que a transmissão contínua exige dispositivo de vídeo no container — sem ele só existe o modo que derruba quem já estava assistindo |
+| Gateway + devices aptos | Botão `grade ao vivo` habilitado |
+
+Três regras que valem para **qualquer transporte** (hoje WebSocket + H.264; WebRTC está por vir, e por isso o gateway é modelado como serviço opaco com URL própria):
+
+1. **O painel precisa estar em HTTPS.** Página segura não embute origem insegura, e a decodificação de vídeo exige contexto seguro.
+2. **O espectador é sempre passivo.** O parâmetro que garante isso **no servidor** é obrigatório na montagem do link — o Olimpo nunca pode roubar o controle de um curador humano operando o device. A tela diz isso em texto, acima da grade.
+3. **Teto de telas simultâneas.** Cada tela aberta é um processo de codificação no host; sem teto, abrir a grade derruba o servidor que se queria observar.
+
+`GET /v1/servers/{id}/devices` → `devices` + `account_placements` + o `screen_gateway` do servidor (ou `null`, que é o que desabilita os botões).
+
+---
+
+## 5. Componentes reutilizáveis
+
+Todos em `panel/src/components/domain/`. Nenhum faz fetch.
+
+| Componente | Propósito | Props principais |
+|---|---|---|
+| **`AccountCard`** | Identidade e estado de uma conta em três densidades (`compact`, `row`, `full`): avatar, handle, plataforma, arquétipo, autonomia, status, seguidores, última ação, saúde do device | `account`, `density`, `onAction` |
+| **`AutonomyBadge`** | L0–L3 com cor, rótulo curto e tooltip explicando o que o nível permite. Aparece em toda tela que mostra conta — é o dado que muda o significado de todo o resto | `level`, `size`, `showLabel` |
+| **`TaskTimeline`** | Sequência de tasks de uma conta/campanha em eixo temporal, com estado por cor, `active_hours` sombreado, marcador de "agora" e agrupamento por `trace_id` | `tasks`, `timezone`, `range`, `activeHours` |
+| **`ReasoningPanel`** | O "por quê" de qualquer artefato: plano, memórias recuperadas, arco, campanha de origem, prompt e `llm_call`. Colapsado por padrão, expansível em camadas (resumo → detalhe → prompt cru) | `subject`, `reasoning`, `dayPlan`, `memories`, `traceId` |
+| **`MediaPreview`** | Imagem/vídeo com aspecto correto por `content_items.kind` (1:1, 4:5, 9:16), carrossel, scrub de vídeo, mudo por padrão, tela cheia com `F`, fallback quando a ref não resolve | `mediaRefs`, `kind`, `mode` |
+| **`QAReport`** | `content_items.qa_report` legível: uma linha por dimensão (visual, textual, marca, legal, consistência de rosto) com veredito, score e detalhe expansível; agrega `guardrail_violations` do mesmo sujeito | `report`, `violations`, `compact` |
+| **`SpreadPolicyEditor`** | Edita `campaigns.spread_policy` com prévia visual dos slots na janela, validação de jitter mínimo, participação máxima e respeito à cadência da conta. Impede configuração detectável por construção | `value`, `window`, `eligibleAccounts`, `onChange` |
+| **`ReconViewer`** | Bruto × análise lado a lado (§4.4), com veredito de segurança em destaque e ângulos sugeridos selecionáveis | `recon`, `onUseAngle` |
+| **`LiveEventFeed`** | Stream de `events` com filtro por tipo/conta/campanha, agrupamento por `trace_id`, pausa automática ao rolar para cima, ícone e cor por tipo de evento | `filters`, `seed`, `maxItems` |
+| **`ApprovalCard`** | O item da fila de aprovação: mídia + caption + `ReasoningPanel` + `QAReport` + ações. Suporta `content_item`, `interaction` e `campaign` como sujeito | `approval`, `subject`, `onDecide`, `keyboard` |
+
+Auxiliares menores, mesma pasta: `StatusDot` (mapa `account_status`/`task_status`/`content_status` → cor), `ClaimStatusBadge`, `RightsStatusBadge`, `MetricSparkline`, `RelativeTime` (renderiza no fuso da conta), `EmptyState`, `ConfirmDialog` (§8), `CommandPalette` (`⌘K`: ir para conta, campanha, task ou `trace_id`).
+
+---
+
+## 6. Tempo real
+
+### 6.1 Transporte
+
+**SSE é o padrão.** O tráfego é unidirecional (servidor → painel) e SSE atravessa proxy, reconecta sozinho e não exige um segundo protocolo na stack. WebSocket só entraria se surgisse interação bidirecional de baixa latência, que não existe no escopo.
+
+```
+GET /v1/events/stream?types=&account_id=&campaign_id=      (text/event-stream)
+```
+
+A FastAPI publica em Redis pub/sub o que grava em `events`; o endpoint de stream assina o canal e reemite filtrado. O painel consome via um Route Handler (`/app/api/stream/route.ts`) que injeta o `API_TOKEN` — o browser nunca vê o token.
+
+Cada mensagem: `{id, type, account_id, campaign_id, task_id, detail, trace_id, created_at}`. O `id` é `events.id` (bigserial), o que dá `Last-Event-ID` de graça: na reconexão o cliente manda o último id visto e o servidor repõe o intervalo perdido a partir de `events`. Sem buracos.
+
+### 6.2 Reconciliação de cache
+
+O evento não carrega o objeto inteiro — ele **invalida**. `useEventStream` mapeia tipo de evento → chaves do TanStack Query a invalidar (`task.verified` → `['tasks', account_id]` + `['overview']`). Isso mantém uma fonte da verdade só: a API. Exceção única é o `LiveEventFeed`, que renderiza o evento diretamente porque o evento *é* o dado.
+
+### 6.3 Fallback
+
+`EventSource` com backoff exponencial (1 s → 30 s). Após 3 falhas, o painel cai para polling e mostra um indicador discreto *"tempo real indisponível — atualizando a cada 15 s"*. O polling nunca é silencioso: um operador precisa saber que o que ele vê pode estar atrasado.
+
+### 6.4 Quem precisa de tempo real de verdade
+
+| Tela | Necessidade | Mecanismo |
+|---|---|---|
+| Visão geral | **Alta** — é a razão da tela existir | SSE |
+| Campanha em execução | **Alta** — decisão de abortar depende de ver ao vivo | SSE |
+| Fila de aprovação | **Média** — só a contagem e itens novos; o item aberto **nunca** é alterado sob o cursor | SSE apenas para o badge de contagem |
+| Monitores | **Média** — contador de próximo check + hits novos | SSE + timer local |
+| Tasks / filas | **Média** | SSE com throttle de 2 s |
+| Ficha da conta | **Baixa** | polling de 30 s enquanto a aba está visível |
+| Conteúdo, interações | **Baixa** | revalidação ao focar a janela |
+| Configurações, persona | **Nenhuma** | busca no carregamento |
+
+**Regra dura:** conteúdo sob o cursor não se mexe. Chegou item novo na fila enquanto você decide? Aparece como *"3 novos — pressione R para recarregar"*, nunca como re-render que desloca o botão que você ia clicar.
+
+---
+
+## 7. Design system
+
+### 7.1 Tema escuro por padrão
+
+Sala de controle fica aberta o dia inteiro, frequentemente em ambiente com pouca luz e ao lado do painel do android-manager. Escuro é o default; claro existe e é completo (nenhuma tela pode ser exclusiva de um tema). Preferência persistida em cookie, aplicada no servidor para não haver flash.
+
+Fundo não é preto puro: `#0B0D10`. Preto puro sobre OLED cria halo em texto branco e cansa em leitura longa.
+
+### 7.2 Cor com significado
+
+**Situação da conta** (`account_status`) — o que *nós* queremos:
+
+| Situação | Rótulo na tela | Cor | Token | Leitura |
+|---|---|---|---|---|
+| `registered` | cadastrada | cinza | `--st-draft` `#6B7280` | existe, não opera |
+| `warming` | aquecendo | âmbar | `--st-warming` `#D97706` | aquecendo, só consome |
+| `active` | ativa | verde | `--st-active` `#16A34A` | operando |
+| `paused` | pausada | azul-acinzentado | `--st-paused` `#64748B` | pausa humana, reversível |
+| `suspended` | suspensa | vermelho | `--st-suspended` `#DC2626` | kill switch — exige ação |
+| `lost` | perdida | vinho apagado | `--st-lost` `#7F1D1D` | banida; fica no sistema de propósito |
+
+**Presença** — o que a *realidade* diz, calculada dos placements ([docs/02 § 3.35](02-modelo-de-dados.md#335-situação-e-presença-dois-eixos-ortogonais)). Escala própria, **nunca a de situação**, porque são eixos ortogonais e confundi-los é o erro que a tela existe para evitar:
+
+| Presença | Rótulo na tela | Cor | Leitura |
+|---|---|---|---|
+| `online` | em device | verde | logada num container visto na última hora |
+| `stale` | sem sinal | âmbar | sem confirmação do inventário há mais de uma hora |
+| `missing` | sumida | vermelho | fora do inventário há mais de um dia — **não é o mesmo que perdida** |
+| `unbound` | sem device | cinza escuro | nunca esteve num device, ou o vínculo foi removido |
+
+**Papel** (`accounts.role`): `agent` agente · `collector` coletora · `utility` utilitária. Sem cor própria — aparece como texto secundário abaixo do handle, porque é qualificador, não estado.
+
+**Severidade de alerta** (`guardrail_violations.severity`):
+
+| Severidade | Cor | Uso |
+|---|---|---|
+| `info` | `#38BDF8` | registro, não interrompe |
+| `warn` | `#F59E0B` | revisar quando puder |
+| `block` | `#EF4444` | publicação impedida — aparece na faixa de atenção |
+| `kill` | `#B91C1C` + fundo sólido | conta suspensa automaticamente — topo absoluto |
+
+**Nível de autonomia** (`autonomy_level`) — escala fria→quente, deliberadamente distinta das cores de status para não competir:
+
+| Nível | Cor | Rótulo |
+|---|---|---|
+| `L0` | `#94A3B8` | Estagiário — só drafts |
+| `L1` | `#38BDF8` | Júnior — posta, interação revisada |
+| `L2` | `#818CF8` | Pleno — posta e responde, amostragem |
+| `L3` | `#C084FC` | Sênior — full auto |
+
+**Estado de task** (`task_status`): `pending` cinza · `scheduled` azul · `dispatched` índigo · `running` índigo pulsante · `verified` verde · `failed` vermelho · `cancelled` cinza riscado · `expired` âmbar riscado.
+
+**Reservadas.** Vermelho é exclusivo de erro, bloqueio e destruição — nunca "marca". Verde é exclusivo de verificado/saudável — nunca "ok, prossiga". Âmbar é exclusivo de dry-run e atenção não bloqueante.
+
+### 7.3 Tipografia e densidade
+
+| Uso | Fonte | Tamanho / peso |
+|---|---|---|
+| Interface e dados | Inter (variável) | 13 px / 400 · rótulos 11 px / 500 · maiúsculas com `tracking-wide` |
+| Números, ids, tokens | JetBrains Mono | 12 px, `tabular-nums` — coluna de número sempre alinha |
+| Títulos de tela | Inter | 18 px / 600 — sem hierarquia de seis níveis |
+| Texto longo (caption, brief, resumo) | Inter | 14 px / 400, `max-width: 68ch` |
+
+Escala de espaçamento de 4 px. Linha de tabela 32 px (compacta) / 40 px (confortável), alternável e persistida. Densidade é preferência do operador, não decisão do designer.
+
+### 7.4 Acessibilidade
+
+- **Contraste** mínimo 4.5:1 para texto e 3:1 para elementos gráficos, verificado nos dois temas. As cores de status acima já foram escolhidas contra `#0B0D10` e `#FFFFFF`.
+- **Cor nunca sozinha.** Todo estado carrega forma além da cor: `StatusDot` usa formato distinto (círculo cheio, anel, quadrado, losango) e todo badge tem texto. Isso resolve daltonismo e impressão em preto e branco.
+- **Foco visível sempre.** Anel de 2 px com offset, alto contraste. `:focus-visible` nunca é removido — regra de lint no Tailwind.
+- **Navegação por teclado completa.** Toda ação alcançável sem mouse. Ordem de tabulação segue a ordem visual. `Esc` fecha qualquer sobreposição. Armadilha de foco correta em diálogo (Radix).
+- **Leitores de tela.** `aria-live="polite"` nas contagens da faixa de atenção; `aria-live="assertive"` só para `kill`. Tabelas com `<caption>` e cabeçalhos associados.
+- **Movimento.** `prefers-reduced-motion` desliga a pulsação de `running` e as transições do feed.
+- **Skip link** para o conteúdo principal, primeira parada de tabulação.
+
+---
+
+## 8. Ações destrutivas e confirmação
+
+Três níveis.
+
+| Nível | Mecanismo | Aplicação |
+|---|---|---|
+| **Simples** | Clique direto + toast com desfazer (10 s) | Aprovar conteúdo, pausar conta, editar caption, pular item, reagendar task, editar cadência |
+| **Confirmação** | Diálogo descrevendo o efeito concreto e o alcance ("isto cancela 4 tasks agendadas") | Rejeitar conteúdo, cancelar task, remover conta de campanha, desabilitar monitor, rebaixar autonomia |
+| **Dupla** | Diálogo + **digitar a palavra exigida** + botão desabilitado por 3 s | Ver abaixo |
+
+**Exigem confirmação dupla:**
+
+| Ação | Palavra a digitar | O diálogo mostra |
+|---|---|---|
+| **Kill switch global** | `PARAR TUDO` | número de contas ativas, tasks que serão canceladas, campanhas interrompidas |
+| **Kill de conta** | o `handle` da conta | tasks canceladas, conteúdo agendado que não sairá |
+| **Promover autonomia** | o nível de destino (`L2`) | o que passa a acontecer sem humano, taxa de rejeição da conta nos últimos 30 dias, violações de guardrail no período |
+| **Aprovar campanha** | `APROVAR` | nº de contas, nº de ações, janela, resumo da `spread_policy`, veredito do recon |
+| **Ligar `DISPATCH_ENABLED`** | `PRODUCAO` | aviso de que ações passam a acontecer em contas reais |
+| **Abortar campanha em execução** | `ABORTAR` | ações já verificadas (irreversíveis) vs. canceláveis |
+| **Apagar conta** | `apagar` | o que cascateia (conteúdo, posts, tasks, aprovações) e a alternativa: **conta banida deve virar `perdida`**. A API recusa sem `confirm=apagar-de-verdade` |
+
+Regras que valem para as três:
+
+- O diálogo **descreve consequência**, não pede confirmação genérica. Nunca "Tem certeza?".
+- Ação destrutiva nunca é o botão primário de um formulário nem fica adjacente a uma ação frequente.
+- Promoção de autonomia é **sempre uma conta por vez**, mesmo com seleção múltipla na lista.
+- Toda ação destrutiva grava `events` com autor, alvo e motivo. Kill switch e mudança de autonomia também geram `guardrail_violations`-adjacente na trilha de auditoria.
+- Rebaixar autonomia e pausar **não** exigem dupla confirmação: o caminho seguro tem que ser o mais barato.
+- **Apagar não existe em lote.** As ações em massa de `/contas` mudam situação, papel, autonomia, rótulos e vínculo de persona — nenhuma delas destrói histórico, e todas são reversíveis. Destruição é sempre uma conta por vez, com digitação.
+
+---
+
+## 9. O que NÃO fazer no painel — anti-requisitos
+
+| Anti-requisito | Por quê |
+|---|---|
+| **Não é um editor de posts.** Não existe "criar post do zero" | Quem cria conteúdo é o agente. Se o humano está escrevendo caption, o loop falhou — corrija o Persona Card ou o prompt, não o post. A exceção é "editar e aprovar", que edita algo que a máquina propôs |
+| **Não é um cliente de Instagram.** Sem feed navegável, sem responder DM de graça, sem explorar perfis | O painel opera o Olimpo, não a plataforma. Quem toca a plataforma é o android-orchestrator |
+| **Não replica o android-manager.** Nada de gerenciar containers redroid, fazer login de conta ou curar device | Saúde da frota é exibida somente leitura, e a tela de Servidores (§4.10) **linka** para o painel de cada serviço em vez de reimplementá-lo. Infra é responsabilidade de outro painel — a garantia técnica é a allowlist do cliente ([contrato](contratos/android-manager.md)) |
+| **Não vira Grafana.** Sem construtor de dashboard, sem série temporal de infra | `make up-obs` já entrega isso. Aqui só entra métrica ligada a decisão |
+| **Sem escrita direta no banco.** Nenhuma tela edita `events`, `memories`, `tasks.status` ou `llm_calls` à mão | Auditoria imutável é premissa. Corrigir estado é ação de API com efeito colateral registrado, não `UPDATE` |
+| **Sem automação escondida na UI.** Nenhuma regra de negócio implementada só no front | Se o painel decide algo, o worker não decide igual. Toda lógica no backend; o painel apresenta e comanda |
+| **Sem aprovação em lote irrestrita** | O lote existe, mas com as travas de §4.3. Aprovar 200 itens com um clique é o mesmo que estar em L3 sem admitir |
+| **Sem "aprovar tudo" nem auto-aprovar por timeout** | Fila crescendo é sinal de que a autonomia está errada ou o agente está ruim. Esconder isso quebra o modelo de governança |
+| **Sem gamificação, streak, confete ou celebração** | É uma sala de controle de operação de risco. Emoção fabricada atrapalha julgamento |
+| **Sem infinite scroll em lista operacional** | Paginação explícita com total. "Quantos itens existem" é informação operacional |
+| **Sem modal empilhado.** No máximo um nível de sobreposição | Contexto perdido em modal aninhado é como se aprova a coisa errada |
+| **Sem dado sem recorte temporal** | Todo número traz janela. "18 tasks" sem "últimas 24 h" é ruído |
+| **Sem esconder o dry-run** | A faixa âmbar de `DISPATCH_ENABLED=false` não é dispensável, não é discreta e não some com o scroll |
+| **Sem tela exclusiva de um tema** | Claro e escuro têm paridade total de recursos |
+| **Sem persona baseada em pessoa real** — o editor de persona recusa upload de referência facial externa | Princípio inegociável do projeto (`docs/00-visao-geral.md`) |
+| **Sem grade de cartões em lista de contas** | Cartão é ótimo para vinte contas e inútil para quatro mil. Lista operacional em volume é tabela densa, paginada no servidor, com facetas e seleção múltipla (§4.2). Cartão sobra para **personas**, que são dezenas |
+| **Sem apagar conta como caminho normal** | Conta banida vira `perdida`. Apagar destrói o histórico que explica por que ela caiu — e é justamente o histórico que impede repetir o erro |
+
+---
+
+## 10. Estados vazios, carregamento e erro
+
+| Situação | Tratamento |
+|---|---|
+| Fila de aprovação vazia | Estado positivo e informativo: "Nada aguardando. 14 itens decididos hoje · tempo médio de decisão 22 s". Não é celebração, é relatório |
+| Lista filtrada sem resultado | Repete o filtro aplicado em texto e oferece limpá-lo. Nunca só "nenhum resultado" |
+| Carregamento | Skeleton com a forma exata do conteúdo final, para não deslocar layout. Sem spinner de tela cheia |
+| API fora | Faixa vermelha persistente com o erro e botão de tentar novamente. O painel **não** mostra cache velho como se fosse atual — dado obsoleto é marcado com a idade |
+| Mídia não resolve | Placeholder com a `media_ref` bruta copiável e link para o storage. Nunca imagem quebrada silenciosa |
+| Fase não implementada | Telas de fase futura (monitores antes da Fase 4) aparecem no menu desabilitadas, com a fase em que chegam. O operador vê o mapa completo do produto |
+
+---
+
+## 11. Entrega por fase
+
+| Fase | O que o painel ganha |
+|---|---|
+| **0** | Página única read-only: contas, tasks, últimos 100 `events`. Sem ações. Prova o encanamento |
+| **1** | Fila de aprovação completa (L0) com `ApprovalCard`, `ReasoningPanel`, `QAReport` e atalhos · ficha da conta com persona, memória e agenda · pausar/kill · SSE · **tela de Servidores** (§4.10): cadastro de host e serviços, sondagem, devices e importação de contas descobertas · **Contas em tabela densa com facetas e lote, e a tela de Personas** (§4.2) · **bloco de identidade visual e galeria de mídia na ficha da persona** (§4.2) |
+| **2** | Tela de interações · promoção de autonomia com confirmação dupla · aba de amostragem L2 · métricas de post na ficha |
+| **3** | Campanhas inteiras: wizard, `SpreadPolicyEditor`, `ReconViewer`, revisão de plano, timeline de execução · biblioteca de conteúdo |
+| **4** | Monitores 24/7 · fila de revisão dedicada a fofoca com `claim_status` obrigatório e lote proibido |
+| **5** | Direitos e atribuição no `ApprovalCard` · filtro por cliente (`clients`) em tudo · papéis de usuário |
+| **6** | Analytics por nicho/horário/formato · comparação A/B conduzida pelos agentes |
+
+---
+
+## 12. Referências
+
+- `docs/01-arquitetura.md` — onde o painel se encaixa
+- `docs/02-modelo-de-dados.md` — as tabelas citadas aqui
+- `docs/04-persona-card-spec.md` — schema que o editor de persona valida
+- `docs/05-loop-do-agente.md` — as oito etapas que a `TaskTimeline` desenha
+- `docs/06-campanhas.md` — recon, `spread_policy`, participantes
+- `docs/07-monitores.md` — regras de disparo e saúde
+- `docs/08-guardrails-e-autonomia.md` — o que cada nível permite e o que a fila precisa bloquear
+- `docs/11-observabilidade.md` — métricas, `events` e `trace_id`
+- `docs/adr/0012-servidor-com-varios-servicos.md` — o modelo por trás da tela de Servidores
+- `docs/adr/0013-persona-separada-da-conta.md` — o modelo por trás das telas de Contas e Personas
+- `docs/13-geracao-de-midia.md` — o que o bloco de identidade visual expõe, e por que a ordem aparece na tela
+- `docs/14-motores-de-prompt.md` — o `escolhas` que a galeria ainda não mostra
+- `docs/adr/0014-absorver-a-maquina-de-influencers.md` — por que Photo Studio e Content Studio precisam nascer de novo em Next.js
+- `docs/contratos/android-manager.md` — o que a frota expõe, e o que ela **não** expõe
+- `db/migrations/0001_initial.sql` — fonte da verdade do schema
+

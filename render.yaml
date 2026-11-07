@@ -1,0 +1,62 @@
+services:
+  - type: web
+    name: olimpo-api
+    runtime: docker
+    plan: free
+    dockerfilePath: ./docker/Dockerfile.api
+    dockerContext: .
+    dockerCommand: "sh -c 'python -m olimpo.db.migrate up && exec uvicorn olimpo.api.main:app --host 0.0.0.0 --port ${PORT:-10000}'"
+    initialDeployHook: python -m olimpo.db.seed
+    healthCheckPath: /health
+    envVars:
+      - key: OLIMPO_ENV
+        value: production
+      - key: DISPATCH_ENABLED
+        value: "false"
+      - key: GLOBAL_KILL_SWITCH
+        value: "true"
+      - key: DATABASE_URL
+        sync: false
+      - key: DATABASE_POOL_SIZE
+        value: "2"
+      - key: DATABASE_MAX_OVERFLOW
+        value: "1"
+      - key: API_TOKEN
+        generateValue: true
+      - key: MEDIA_ROOT
+        value: /tmp/olimpo-media
+      - key: APPRUNCLOUD_BASE_URL
+        value: https://www.appruncloud.com
+      - key: APPRUNCLOUD_API_KEY
+        sync: false
+      - key: APPRUNCLOUD_ORG_ID
+        sync: false
+
+  - type: web
+    name: olimpo-panel
+    runtime: docker
+    plan: free
+    dockerfilePath: ./panel/Dockerfile
+    dockerContext: ./panel
+    healthCheckPath: /login
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: "10000"
+      - key: OLIMPO_API_URL
+        # A API gratuita é acessada pela URL pública HTTPS, resolvida pelo Render.
+        fromService:
+          type: web
+          name: olimpo-api
+          envVarKey: RENDER_EXTERNAL_URL
+      - key: OLIMPO_API_TOKEN
+        fromService:
+          type: web
+          name: olimpo-api
+          envVarKey: API_TOKEN
+      - key: PANEL_ACCESS_PASSWORD
+        sync: false
+      - key: PANEL_SESSION_SECRET
+        generateValue: true
+
