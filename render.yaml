@@ -16,6 +16,10 @@ services:
         value: "true"
       - key: DATABASE_URL
         sync: false
+      - key: APPRUNCLOUD_API_KEY
+        sync: false
+      - key: APPRUNCLOUD_ORG_ID
+        sync: false
       - key: DATABASE_POOL_SIZE
         value: "2"
       - key: DATABASE_MAX_OVERFLOW
@@ -52,4 +56,3 @@ services:
         sync: false
       - key: PANEL_SESSION_SECRET
         generateValue: true
-
