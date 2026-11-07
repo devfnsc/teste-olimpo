@@ -25,12 +25,6 @@ services:
         generateValue: true
       - key: MEDIA_ROOT
         value: /tmp/olimpo-media
-      - key: APPRUNCLOUD_BASE_URL
-        value: https://www.appruncloud.com
-      - key: APPRUNCLOUD_API_KEY
-        sync: false
-      - key: APPRUNCLOUD_ORG_ID
-        sync: false
 
   - type: web
     name: olimpo-panel
