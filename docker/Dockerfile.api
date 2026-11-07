@@ -23,5 +23,5 @@ RUN useradd -m -u 1000 olimpo && chown -R olimpo:olimpo /app
 USER olimpo
 
 EXPOSE 10000
-CMD ["sh", "-c", "uvicorn olimpo.api.main:app --host 0.0.0.0 --port ${PORT:-10000}"]
+CMD ["sh", "-c", "python -m olimpo.db.migrate up && exec uvicorn olimpo.api.main:app --host 0.0.0.0 --port ${PORT:-10000}"]
 
