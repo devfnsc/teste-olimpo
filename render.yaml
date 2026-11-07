@@ -5,7 +5,6 @@ services:
     plan: free
     dockerfilePath: ./docker/Dockerfile.api
     dockerContext: .
-    dockerCommand: "sh -c 'python -m olimpo.db.migrate up && exec uvicorn olimpo.api.main:app --host 0.0.0.0 --port ${PORT:-10000}'"
     initialDeployHook: python -m olimpo.db.seed
     healthCheckPath: /health
     envVars:
