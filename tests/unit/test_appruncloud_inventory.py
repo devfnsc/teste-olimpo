@@ -104,29 +104,31 @@ async def test_detalhes_aceitam_resposta_com_chave_instances(
 
 
 @pytest.mark.asyncio
-async def test_detalhe_get_tenta_novamente_apos_400_temporario(
+async def test_detalhe_nao_repete_rejeicao_400_e_expoe_status_sem_detalhes_sensiveis(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     client = FakeClient()
-    original = client.instagram_accounts
     attempts = 0
 
-    async def intermittently_rejected(instance_id: str) -> dict[str, Any]:
+    async def rejected(instance_id: str) -> dict[str, Any]:
         nonlocal attempts
         attempts += 1
-        if attempts < 3:
-            raise AppRunCloudBadRequestError(400, "temporary app-data issue")
-        return await original(instance_id)
+        raise AppRunCloudBadRequestError(
+            400,
+            "invalid app data",
+            error="ig_accounts",
+        )
 
-    client.instagram_accounts = intermittently_rejected  # type: ignore[method-assign]
+    client.instagram_accounts = rejected  # type: ignore[method-assign]
     monkeypatch.setattr(inventory, "_client", lambda: client)
 
     result = await inventory.list_instances(include_details=True, detail_limit=1)
     item = result["data"][0]
 
-    assert attempts == 3
-    assert "instagram_accounts_detail" in item
-    assert "instagram_accounts_error" not in item
+    assert attempts == 1
+    assert item["instagram_accounts_error"] == "consulta_indisponivel"
+    assert item["instagram_accounts_upstream_status"] == 400
+    assert "invalid app data" not in str(item)
 
 
 @pytest.mark.asyncio

@@ -76,6 +76,9 @@ export default function AppRunCloudInventory() {
   const visibleInstances = filtered.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE);
   const firstVisible = filtered.length === 0 ? 0 : (currentPage - 1) * PAGE_SIZE + 1;
   const lastVisible = Math.min(currentPage * PAGE_SIZE, filtered.length);
+  const instancesWithDetailErrors = instances.filter((instance) =>
+    Boolean(instance.account_detail_error || instance.instagram_accounts_error || instance.device_detail_error),
+  ).length;
 
   const errorMessage = error instanceof Error && error.message.includes("503")
     ? "A conexão de leitura ainda não foi configurada no backend."
@@ -100,14 +103,22 @@ export default function AppRunCloudInventory() {
         </button>
       </header>
 
-      <section className="grid gap-3 sm:grid-cols-3">
+      <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <Metric label="Instâncias retornadas" value={error ? "—" : instances.length} />
         <Metric label="Correspondem à busca" value={error ? "—" : filtered.length} />
+        <Metric label="Instâncias com detalhes pendentes" value={error ? "—" : instancesWithDetailErrors} />
         <div className="card flex items-center gap-2 text-sm">
           <span className={`h-2 w-2 rounded-full ${error ? "bg-amber-300" : isLoading ? "bg-slate-500" : "bg-active"}`} />
-          <span className="text-slate-300">{error ? "Sem conexão" : isLoading ? "Consultando…" : parsedInstances === null ? "Formato não reconhecido" : "Consulta disponível"}</span>
+          <span className="text-slate-300">{error ? "Sem conexão" : isLoading ? "Consultando…" : parsedInstances === null ? "Formato não reconhecido" : instancesWithDetailErrors > 0 ? "Consulta parcial" : "Consulta disponível"}</span>
         </div>
       </section>
+
+      {!error && instancesWithDetailErrors > 0 && (
+        <div className="flex items-start gap-2 rounded-md border border-amber-300/20 bg-amber-300/5 p-4 text-sm text-amber-100">
+          <AlertTriangle size={15} className="mt-0.5 shrink-0" />
+          A lista de instâncias foi carregada, mas algumas consultas detalhadas foram recusadas. O status exibido em cada linha ajuda a identificar qual informação não foi retornada.
+        </div>
+      )}
 
       <div className="relative">
         <Search size={14} className="absolute left-2.5 top-2.5 text-slate-600" />
@@ -193,6 +204,9 @@ function InstanceRow({ instance, busyId, onBusyChange }: {
     accountError: boolean;
     instagramAccountsError: boolean;
     deviceError: boolean;
+    accountStatus: number | null;
+    instagramAccountsStatus: number | null;
+    deviceStatus: number | null;
   } | null>(null);
   const currentQueryResult = queryResult?.source === instance ? queryResult : null;
   const accountData = currentQueryResult
@@ -213,6 +227,15 @@ function InstanceRow({ instance, busyId, onBusyChange }: {
   const deviceError = currentQueryResult
     ? currentQueryResult.deviceError
     : Boolean(instance.device_detail_error);
+  const accountStatus = currentQueryResult
+    ? currentQueryResult.accountStatus
+    : typeof instance.account_detail_upstream_status === "number" ? instance.account_detail_upstream_status : null;
+  const instagramAccountsStatus = currentQueryResult
+    ? currentQueryResult.instagramAccountsStatus
+    : typeof instance.instagram_accounts_upstream_status === "number" ? instance.instagram_accounts_upstream_status : null;
+  const deviceStatus = currentQueryResult
+    ? currentQueryResult.deviceStatus
+    : typeof instance.device_detail_upstream_status === "number" ? instance.device_detail_upstream_status : null;
   const [loading, setLoading] = useState(false);
   const [requestState, setRequestState] = useState<{ source: RecordValue; requested: boolean } | null>(null);
   const requested = requestState?.source === instance
@@ -238,6 +261,9 @@ function InstanceRow({ instance, busyId, onBusyChange }: {
         accountError: accountResult.status === "rejected",
         instagramAccountsError: instagramAccountsResult.status === "rejected",
         deviceError: deviceResult.status === "rejected",
+        accountStatus: upstreamStatus(accountResult),
+        instagramAccountsStatus: upstreamStatus(instagramAccountsResult),
+        deviceStatus: upstreamStatus(deviceResult),
       });
     } finally {
       setLoading(false);
@@ -257,19 +283,21 @@ function InstanceRow({ instance, busyId, onBusyChange }: {
     || nestedScalar(asRecord(deviceData) ?? {}, ["device", "data", "android"], ["device_name", "model", "name", "label"]);
   const state = nestedScalar(instance, ["device"], ["status", "state", "connection_status", "online"])
     || nestedScalar(asRecord(deviceData) ?? {}, ["device", "data", "android"], ["status", "state", "connection_status", "online"]);
-  const accountLabel = accountListLoaded
+  const accountLabel = accountError || instagramAccountsError
+    ? upstreamErrorLabel(accountStatus ?? instagramAccountsStatus)
+    : accountListLoaded
     ? accountRecords === null
       ? accountListIsNull
-        ? "API retornou accounts=null"
+        ? "AppRunCloud retornou accounts=null"
         : "Formato da lista não reconhecido"
       : accountNames.length > 0
         ? accountNames.join(", ")
         : accountRecords.length > 0
           ? `${accountRecords.length} conta(s) logada(s)`
           : "Nenhuma conta logada"
-    : account || (loading ? "Consultando…" : accountError || instagramAccountsError ? "Falha na consulta" : requested ? "Não informado" : "Não consultado");
-  const deviceLabel = device || (loading ? "Consultando…" : deviceError ? "Falha na consulta" : requested ? "Não informado" : "Não consultado");
-  const stateLabel = state || (loading ? "Consultando…" : deviceError ? "Falha na consulta" : requested ? "Estado não informado" : "Não consultado");
+    : account || (loading ? "Consultando…" : requested ? "Não informado" : "Não consultado");
+  const deviceLabel = device || (loading ? "Consultando…" : deviceError ? upstreamErrorLabel(deviceStatus) : requested ? "Não informado" : "Não consultado");
+  const stateLabel = state || (loading ? "Consultando…" : deviceError ? upstreamErrorLabel(deviceStatus) : requested ? "Estado não informado" : "Não consultado");
 
   return (
     <tr className="border-t border-surface-border hover:bg-surface-raised/40">
@@ -287,5 +315,23 @@ function InstanceRow({ instance, busyId, onBusyChange }: {
       </td>
     </tr>
   );
+}
+
+function upstreamStatus(result: PromiseSettledResult<unknown>): number | null {
+  if (result.status !== "rejected" || !(result.reason instanceof Error)) return null;
+  const match = result.reason.message.match(/\b(400|401|403|422|502|503)\b/);
+  if (!match) return null;
+  // O backend converte HTTP 400 do provedor em 422 para indicar rejeição de dados.
+  return match[1] === "422" ? 400 : Number(match[1]);
+}
+
+function upstreamErrorLabel(status: number | null): string {
+  return status === 400
+    ? "AppRunCloud recusou a consulta (HTTP 400)"
+    : status === 401 || status === 403
+      ? `Acesso recusado (HTTP ${status})`
+      : status
+        ? `Falha na consulta (HTTP ${status})`
+        : "Falha na consulta detalhada";
 }
 

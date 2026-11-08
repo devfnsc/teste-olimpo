@@ -90,7 +90,9 @@ async def _read(operation: Awaitable[dict[str, Any]]) -> dict[str, Any]:
             ) from exc
         if exc.status_code == 400:
             raise HTTPException(
-                422, "A AppRunCloud recusou os parâmetros ou os dados da consulta."
+                422,
+                "A AppRunCloud recusou os parâmetros ou os dados da consulta.",
+                headers={"X-AppRunCloud-Status": "400"},
             ) from exc
         raise HTTPException(
             502,
@@ -139,10 +141,23 @@ async def list_instances(
                 try:
                     return await _read(operation())
                 except HTTPException as exc:
-                    if exc.status_code != 422 or attempt == 2:
+                    if (
+                        exc.status_code != 422
+                        or exc.headers.get("X-AppRunCloud-Status") == "400"
+                        or attempt == 2
+                    ):
                         raise
                     await asyncio.sleep(0.15 * (attempt + 1))
             raise RuntimeError("Consulta detalhada encerrada sem resultado")
+
+    def upstream_status(result: Any) -> int | None:
+        if not isinstance(result, HTTPException):
+            return None
+        raw_status = (result.headers or {}).get("X-AppRunCloud-Status")
+        try:
+            return int(raw_status) if raw_status else None
+        except ValueError:
+            return None
 
     async def enrich(instance: Any) -> Any:
         if not isinstance(instance, dict):
@@ -171,14 +186,23 @@ async def list_instances(
         enriched = dict(instance)
         if isinstance(account_result, Exception):
             enriched["account_detail_error"] = "consulta_indisponivel"
+            status = upstream_status(account_result)
+            if status is not None:
+                enriched["account_detail_upstream_status"] = status
         else:
             enriched["account_detail"] = account_result
         if isinstance(instagram_accounts_result, Exception):
             enriched["instagram_accounts_error"] = "consulta_indisponivel"
+            status = upstream_status(instagram_accounts_result)
+            if status is not None:
+                enriched["instagram_accounts_upstream_status"] = status
         else:
             enriched["instagram_accounts_detail"] = instagram_accounts_result
         if isinstance(device_result, Exception):
             enriched["device_detail_error"] = "consulta_indisponivel"
+            status = upstream_status(device_result)
+            if status is not None:
+                enriched["device_detail_upstream_status"] = status
         else:
             enriched["device_detail"] = device_result
         return enriched

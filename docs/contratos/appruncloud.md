@@ -19,6 +19,12 @@ do backend `APPRUNCLOUD_API_KEY` e `APPRUNCLOUD_ORG_ID`; a chave deve pertencer
 à organização indicada. `APPRUNCLOUD_BASE_URL` é opcional e, por padrão,
 aponta para `https://www.appruncloud.com`. O timeout padrão é 30 segundos.
 
+No OpenAPI, `GET /v1/instances/{id}/instagram/accounts` exige o `id` da rota e
+`org_id` na query, ambos UUIDs. A resposta `400` está descrita como parâmetro
+inválido ou ausente. O contrato não afirma que uma instância parada, por si só,
+impeça essa leitura; por isso, esse estado não deve ser tratado como causa
+confirmada de um `400`.
+
 Ao carregar a listagem detalhada, o Olimpo consulta a conta ativa, todas as
 contas Instagram logadas e o dispositivo para no máximo seis instâncias por
 consulta. IDs inválidos e falhas parciais de detalhe não impedem a exibição das
