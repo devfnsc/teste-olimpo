@@ -52,7 +52,7 @@ def _safe_upstream_detail(value: str | None) -> str | None:
     return detail
 
 
-def _client() -> AppRunCloudClient: -> AppRunCloudClient:
+def _client() -> AppRunCloudClient:
     try:
         config = AppRunCloudConfig.from_env()
     except AppRunCloudConfigurationError as exc:
