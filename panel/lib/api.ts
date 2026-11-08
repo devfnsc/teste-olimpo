@@ -2,17 +2,45 @@
 // ficam no servidor, fora do bundle público do painel.
 const BASE = "/api/olimpo";
 
-/** Fetcher do SWR. Caminhos são relativos à API (ex.: "/v1/accounts").
- *  Retorno `any` de propósito: o SWR infere o tipo do fetcher, e um genérico
- *  aqui faria toda chamada virar `{}` no lado de quem consome. */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-export async function api(path: string): Promise<any> {
+// Os serviços gratuitos do Render podem dormir após um período sem tráfego.
+// Uma única sonda compartilhada acorda a API antes de várias telas consultarem
+// endpoints diferentes em paralelo.
+let healthRequest: Promise<unknown> | null = null;
+let healthFreshUntil = 0;
+let healthSnapshot: unknown;
+
+async function requestJson(path: string): Promise<any> {
   const res = await fetch(`${BASE}${path}`, {
     headers: { "Content-Type": "application/json" },
     cache: "no-store",
   });
   if (!res.ok) throw new Error(`${res.status} ${res.statusText} — ${path}`);
   return res.json();
+}
+
+function apiHealth(): Promise<unknown> {
+  if (healthRequest) return healthRequest;
+  if (Date.now() < healthFreshUntil) return Promise.resolve(healthSnapshot);
+
+  const current = requestJson("/health").then((health) => {
+    healthSnapshot = health;
+    healthFreshUntil = Date.now() + 4 * 60_000;
+    return health;
+  }).finally(() => {
+    if (healthRequest === current) healthRequest = null;
+  });
+  healthRequest = current;
+  return current;
+}
+
+/** Fetcher do SWR. Caminhos são relativos à API (ex.: "/v1/accounts").
+ *  Retorno `any` de propósito: o SWR infere o tipo do fetcher, e um genérico
+ *  aqui faria toda chamada virar `{}` no lado de quem consome. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export async function api(path: string): Promise<any> {
+  if (path === "/health") return apiHealth();
+  await apiHealth();
+  return requestJson(path);
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -52,4 +80,3 @@ export function subscribeEvents(onEvent: (e: unknown) => void): () => void {
 export function urlDaMidia(assetId: string): string {
   return `${BASE}/v1/media/${assetId}/arquivo`;
 }
-
