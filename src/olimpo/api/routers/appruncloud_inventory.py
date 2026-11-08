@@ -7,6 +7,8 @@ device. Não usa os métodos de ação do cliente AppRunCloud.
 from __future__ import annotations
 
 import asyncio
+import os
+import re
 from collections.abc import Awaitable, Callable
 from typing import Any
 from uuid import UUID
@@ -25,8 +27,32 @@ from olimpo.integrations.appruncloud import (
 router = APIRouter(prefix="/v1/integrations/appruncloud", tags=["AppRunCloud · leitura"])
 log = structlog.get_logger(__name__)
 
+_UUID_PATTERN = re.compile(
+    r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b"
+)
+_API_KEY_PATTERN = re.compile(r"\bark_[A-Za-z0-9_-]+\b")
 
-def _client() -> AppRunCloudClient:
+
+def _safe_upstream_detail(value: str | None) -> str | None:
+    """Keep useful provider diagnostics out of logs only after redacting secrets."""
+    if not value:
+        return None
+    detail = value[:240]
+    for name in (
+        "APPRUNCLOUD_API_KEY",
+        "APPRUNCLOUD_ORG_ID",
+        "APPRUNCLOUD_INSTANCE_ID",
+    ):
+        secret = os.getenv(name, "")
+        if secret:
+            detail = detail.replace(secret, "[redacted]")
+    detail = _API_KEY_PATTERN.sub("[redacted]", detail)
+    detail = _UUID_PATTERN.sub("[redacted]", detail)
+    return detail
+
+
+def _client() -> AppRunCloudClient: -> AppRunCloudClient:
     try:
         config = AppRunCloudConfig.from_env()
     except AppRunCloudConfigurationError as exc:
@@ -51,6 +77,8 @@ async def _read(operation: Awaitable[dict[str, Any]]) -> dict[str, Any]:
             "appruncloud.read_rejected",
             error_type=type(exc).__name__,
             upstream_status=exc.status_code,
+            upstream_error=_safe_upstream_detail(exc.error),
+            upstream_hint=_safe_upstream_detail(exc.hint),
         )
         if exc.status_code == 401:
             raise HTTPException(
