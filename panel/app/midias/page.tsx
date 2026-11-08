@@ -51,6 +51,14 @@ export default function Midias() {
     useSWR("/v1/media/opcoes", api, { refreshInterval: 60_000 });
 
   const midias = data?.media ?? [];
+  const gruposPorPersona = useMemo(() => {
+    const grupos = new Map<string, any[]>();
+    for (const midia of midias) {
+      const chave = midia.persona_name || "";
+      grupos.set(chave, [...(grupos.get(chave) ?? []), midia]);
+    }
+    return [...grupos.entries()].sort(([a], [b]) => a === "" ? 1 : b === "" ? -1 : a.localeCompare(b, "pt-BR"));
+  }, [midias]);
 
   function filtrar(chave: string, valor: string) {
     setFiltros((f) => ({ ...f, [chave]: f[chave] === valor ? "" : valor }));
@@ -120,10 +128,16 @@ export default function Midias() {
           Nenhuma mídia com esses filtros.
         </div>
       ) : (
-        <div className="grid grid-cols-3 gap-2 sm:grid-cols-5 lg:grid-cols-7 xl:grid-cols-8">
-          {midias.map((m: any) => (
-            <Miniatura key={m.id} midia={m} onAbrir={() => setAberta(m)} />
-          ))}
+        <div className="space-y-5">
+          {gruposPorPersona.map(([persona, itens]) => <section key={persona || "sem-persona"}>
+            <div className="mb-2 flex items-center justify-between border-b border-surface-border pb-2">
+              <h2 className="text-sm font-medium text-slate-300">{persona ? `Persona: ${persona}` : "Sem persona"}</h2>
+              <span className="text-[10px] text-slate-600">{itens.length} mídia{itens.length === 1 ? "" : "s"}</span>
+            </div>
+            <div className="grid grid-cols-3 gap-2 sm:grid-cols-5 lg:grid-cols-7 xl:grid-cols-8">
+              {itens.map((m: any) => <Miniatura key={m.id} midia={m} onAbrir={() => setAberta(m)} />)}
+            </div>
+          </section>)}
         </div>
       )}
 
@@ -261,11 +275,9 @@ function Miniatura({ midia, onAbrir }: { midia: any; onAbrir: () => void }) {
       <span className={`absolute left-1 top-1 rounded border px-1 py-0.5 text-[9px] ${papel.cor}`}>
         {papel.rotulo}
       </span>
-      {midia.persona_name && (
-        <span className="absolute bottom-0 left-0 right-0 truncate bg-black/70 px-1 py-0.5 text-[9px] text-slate-300">
-          {midia.persona_name}
-        </span>
-      )}
+      <span className="absolute bottom-0 left-0 right-0 truncate bg-black/70 px-1 py-0.5 text-[9px] text-slate-300">
+        {midia.persona_name || "Sem persona"}
+      </span>
     </button>
   );
 }
@@ -316,9 +328,7 @@ function Detalhe({ midia, onFechar, onApagada }: {
           {papel.ajuda && <p className="text-xs text-slate-500">{papel.ajuda}</p>}
 
           <dl className="space-y-1.5 border-t border-surface-border pt-3 text-xs">
-            {midia.persona_name && (
-              <Linha rotulo="persona">{midia.persona_name}</Linha>
-            )}
+            <Linha rotulo="persona">{midia.persona_name || "Sem persona"}</Linha>
             {midia.model && <Linha rotulo="modelo">{midia.model}</Linha>}
             {midia.provider && <Linha rotulo="provider">{midia.provider}</Linha>}
             {midia.aspect_ratio && <Linha rotulo="proporção">{midia.aspect_ratio}</Linha>}
@@ -374,4 +384,3 @@ function Linha({ rotulo, children }: { rotulo: string; children: React.ReactNode
     </div>
   );
 }
-

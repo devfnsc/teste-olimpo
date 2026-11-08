@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import useSWR from "swr";
 import { AlertTriangle, CheckCircle2, Loader2, RefreshCw } from "lucide-react";
 import { api } from "@/lib/api";
@@ -56,6 +56,66 @@ function detailStatus(instance: AppRunCloudRecord): { label: string; failed: boo
     label: failed ? "Detalhes com falha" : hasDetails ? "Detalhes recebidos" : "Somente inventário",
     failed,
   };
+}
+
+function CompleteAnalysis({ instance, id }: { instance: AppRunCloudRecord; id: string }) {
+  const [open, setOpen] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [results, setResults] = useState<Array<{ name: string; value: unknown; error: string }> | null>(null);
+  const failedRoutes = [
+    ["Conta principal", "account", Boolean(instance.account_detail_error)],
+    ["Contas Instagram", "instagram/accounts", Boolean(instance.instagram_accounts_error)],
+    ["Dispositivo", "device", Boolean(instance.device_detail_error)],
+  ] as const;
+
+  async function analyze() {
+    setOpen(true);
+    if (loading) return;
+    setLoading(true);
+    try {
+      const checks = failedRoutes.filter(([, , failed]) => failed);
+      const outcomes = await Promise.all(checks.map(async ([name, route]) => {
+        try {
+          const value = await api(`/v1/integrations/appruncloud/instances/${encodeURIComponent(id)}/${route}`);
+          return { name, value, error: "" };
+        } catch (error) {
+          return { name, value: null, error: error instanceof Error ? error.message.replace(/^Error:\s*/, "") : "Falha na consulta" };
+        }
+      }));
+      setResults(outcomes);
+    } finally { setLoading(false); }
+  }
+
+  function summary(name: string, value: unknown): string {
+    if (name === "Contas Instagram") {
+      const accounts = extractAccounts(value);
+      return accounts === null ? "Resposta recebida; formato da lista não reconhecido." : accounts.length
+        ? accounts.map((item) => readScalar(item, ["username", "handle", "name"])).filter(Boolean).join(", ") || `${accounts.length} conta(s) retornada(s)`
+        : "Consulta concluída; nenhuma conta retornada.";
+    }
+    if (name === "Conta principal") {
+      return readScalar(value, ["username", "handle", "name"]) || "Consulta concluída; sem nome de conta na resposta.";
+    }
+    const device = readScalar(value, ["device_name", "device_model", "model", "name", "label"]);
+    const android = readScalar(value, ["android_version"]);
+    const status = readScalar(value, ["status", "state", "connection_status", "online"]);
+    return [device, android && `Android ${android}`, status && `Estado: ${status}`].filter(Boolean).join(" · ") || "Consulta concluída; sem campos de dispositivo reconhecidos.";
+  }
+
+  return <div className="mt-2">
+    <button onClick={() => void analyze()} disabled={loading} className="btn-ghost !px-2 !py-1 text-[10px]">
+      {loading ? <Loader2 size={11} className="animate-spin" /> : <RefreshCw size={11} />}
+      Análise completa
+    </button>
+    {open && <div className="mt-2 space-y-2 rounded border border-surface-border bg-surface/60 p-2 text-[10px]">
+      {loading && <p className="text-slate-500">Consultando novamente apenas os detalhes que falharam…</p>}
+      {results?.map((result) => <div key={result.name}>
+        <div className="font-medium text-slate-300">{result.name}</div>
+        <p className={result.error ? "mt-0.5 break-words text-amber-200" : "mt-0.5 text-slate-400"}>{result.error || summary(result.name, result.value)}</p>
+      </div>)}
+      {results && results.length === 0 && <p className="text-slate-500">Não há consulta detalhada marcada com falha nesta instância.</p>}
+    </div>}
+  </div>;
 }
 
 export default function RevisoesPage() {
@@ -129,6 +189,7 @@ export default function RevisoesPage() {
                   <td className={`px-3 py-3 text-xs ${detail.failed ? "text-amber-200" : "text-slate-400"}`}>
                     {detail.failed ? <AlertTriangle size={13} className="mr-1 inline" /> : detail.label === "Detalhes recebidos" ? <CheckCircle2 size={13} className="mr-1 inline text-emerald-300" /> : null}
                     {detail.label}
+                    {detail.failed && <CompleteAnalysis instance={instance} id={id} />}
                   </td>
                 </tr>;
               })}
@@ -144,4 +205,3 @@ export default function RevisoesPage() {
 function Metric({ label, value, alert = false }: { label: string; value: number | string; alert?: boolean }) {
   return <div className="card"><div className="label">{label}</div><div className={`mt-1 font-mono text-2xl font-semibold tabular-nums ${alert ? "text-amber-200" : "text-slate-100"}`}>{value}</div></div>;
 }
-

@@ -14,7 +14,14 @@ async function requestJson(path: string): Promise<any> {
     headers: { "Content-Type": "application/json" },
     cache: "no-store",
   });
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText} — ${path}`);
+  if (!res.ok) {
+    let detail = "";
+    try {
+      const body = await res.json();
+      if (typeof body?.detail === "string") detail = body.detail;
+    } catch { /* resposta sem JSON */ }
+    throw new Error(`${res.status} ${res.statusText}${detail ? ` — ${detail}` : ""} — ${path}`);
+  }
   return res.json();
 }
 

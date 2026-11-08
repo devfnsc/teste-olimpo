@@ -5,9 +5,10 @@ import Link from "next/link";
 import useSWR from "swr";
 import {
   Search, Plus, ChevronLeft, ChevronRight, Users, Link2, HelpCircle,
-  StickyNote, Smartphone,
+  StickyNote, Smartphone, Server, RefreshCw, AlertTriangle,
 } from "lucide-react";
 import { api, mutate } from "@/lib/api";
+import { extractAccounts, extractInstances, type AppRunCloudRecord } from "@/lib/appruncloud";
 import {
   STATUS, PRESENCA, AUTONOMIA, PLATAFORMA, ARQUETIPO, PAPEL, tempoRelativo,
 } from "@/lib/contas";
@@ -19,6 +20,42 @@ import {
  * bonitos não sobrevivem a quatro mil contas: o que o operador precisa é
  * varrer, filtrar e agir em lote.
  */
+function scalar(value: unknown, keys: string[], depth = 0): string {
+  if (!value || typeof value !== "object" || depth > 5) return "";
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = scalar(item, keys, depth + 1);
+      if (found) return found;
+    }
+    return "";
+  }
+  const record = value as Record<string, unknown>;
+  for (const key of keys) {
+    const field = record[key];
+    if (typeof field === "string" || typeof field === "number") return String(field);
+  }
+  for (const field of Object.values(record)) {
+    const found = scalar(field, keys, depth + 1);
+    if (found) return found;
+  }
+  return "";
+}
+
+function normalizedHandle(value: string): string {
+  return value.trim().replace(/^@+/, "").toLocaleLowerCase("pt-BR");
+}
+
+function handlesFromInstance(instance: AppRunCloudRecord): string[] {
+  const primary = scalar(instance.account_detail, ["username", "handle"])
+    || scalar(instance.account, ["username", "handle"])
+    || scalar(instance.logged_account, ["username", "handle"]);
+  if (primary) return [primary];
+  const accounts = extractAccounts(
+    instance.instagram_accounts_detail ?? instance.instagram_accounts ?? instance.accounts,
+  ) ?? [];
+  return [...new Set(accounts.map((account) => scalar(account, ["username", "handle"])) .filter(Boolean))];
+}
+
 export default function Contas() {
   const [q, setQ] = useState("");
   const [filtros, setFiltros] = useState<Record<string, string>>({});
@@ -36,9 +73,23 @@ export default function Contas() {
   const { data, mutate: reload } = useSWR(`/v1/accounts?${query}`, api, {
     refreshInterval: 30_000, keepPreviousData: true,
   });
+  const { data: inventarioData, error: inventarioError, isLoading: inventarioLoading, mutate: reloadInventario } =
+    useSWR("/v1/integrations/appruncloud/instances", api, { refreshInterval: 60_000 });
+  const { data: vinculosData, isLoading: vinculosLoading } = useSWR(
+    "/v1/accounts?page=1&per_page=500", api,
+  );
 
   const contas = data?.accounts ?? [];
   const facets = data?.facets ?? {};
+  const inventario = extractInstances(inventarioData) ?? [];
+  const contasPorHandle = useMemo(() => {
+    const byHandle = new Map<string, Record<string, unknown>>();
+    for (const account of vinculosData?.accounts ?? []) {
+      const key = normalizedHandle(String(account.handle ?? ""));
+      if (key && !byHandle.has(key)) byHandle.set(key, account);
+    }
+    return byHandle;
+  }, [vinculosData]);
 
   function alternarFiltro(chave: string, valor: string) {
     setFiltros((f) => ({ ...f, [chave]: f[chave] === valor ? "" : valor }));
@@ -70,6 +121,35 @@ export default function Contas() {
           </button>
         </div>
       </header>
+
+      <section className="card space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 className="flex items-center gap-2 text-sm font-semibold text-slate-200"><Server size={14} /> Instâncias AppRunCloud</h2>
+            <p className="mt-1 text-xs text-slate-500">Vínculo da instância com uma conta cadastrada e sua persona no Olimpo.</p>
+          </div>
+          <button onClick={() => void reloadInventario()} disabled={inventarioLoading} className="btn-ghost">
+            <RefreshCw size={12} className={inventarioLoading ? "animate-spin" : ""} /> Atualizar instâncias
+          </button>
+        </div>
+        {inventarioError ? <p role="alert" className="flex items-center gap-2 text-xs text-amber-200"><AlertTriangle size={13} /> Não foi possível carregar as instâncias AppRunCloud.</p>
+          : inventarioLoading && inventario.length === 0 ? <p className="text-xs text-slate-500">Carregando instâncias…</p>
+          : inventario.length === 0 ? <p className="text-xs text-slate-500">Nenhuma instância retornada.</p>
+          : <div className="overflow-x-auto"><table className="w-full min-w-[700px] text-left text-xs">
+            <thead className="text-[10px] uppercase tracking-wider text-slate-600"><tr><th className="py-2 pr-3">Instância</th><th className="py-2 pr-3">Conta identificada</th><th className="py-2 pr-3">Persona</th><th className="py-2">Estado</th></tr></thead>
+            <tbody>{inventario.map((instance, index) => {
+              const id = scalar(instance, ["id", "instance_id", "uuid"]) || `instância-${index + 1}`;
+              const handles = handlesFromInstance(instance);
+              const linked = handles.map((handle) => ({ handle, account: contasPorHandle.get(normalizedHandle(handle)) })).filter((item) => item.account);
+              const accountLabel = handles.join(", ") || "Conta não identificada";
+              const personaLabels = [...new Set(linked.map(({ account }) => String(account?.persona_name ?? (account?.persona_id ? "Persona vinculada" : "Sem persona"))))];
+              const personaLabel = handles.length === 0 ? "Não foi possível conferir" : linked.length === 0 ? "Conta sem cadastro no Olimpo" : personaLabels.join(", ");
+              const state = scalar(instance, ["state", "status", "connection_status"]) || "Não informado";
+              return <tr key={id} className="border-t border-surface-border"><td className="py-2 pr-3"><span className="text-slate-200">{scalar(instance, ["label", "name", "app_name"]) || id}</span><span className="ml-2 font-mono text-[10px] text-slate-600">{id}</span></td><td className="py-2 pr-3 text-slate-300">{accountLabel}</td><td className="py-2 pr-3 text-slate-400">{personaLabel}</td><td className="py-2 text-slate-500">{state}</td></tr>;
+            })}</tbody>
+          </table></div>}
+        {vinculosLoading && <p className="text-[10px] text-slate-600">Conferindo vínculos com personas…</p>}
+      </section>
 
       {novo && <FormConta onDone={() => { setNovo(false); reload(); }} />}
 
@@ -422,4 +502,3 @@ function FormConta({ onDone }: { onDone: () => void }) {
     </div>
   );
 }
-

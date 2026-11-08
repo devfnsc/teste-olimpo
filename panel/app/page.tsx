@@ -220,8 +220,8 @@ export default function Overview() {
         <section className="card overflow-hidden !p-0">
           <div className="flex items-center justify-between border-b border-surface-border px-4 py-3">
             <div>
-              <h2 className="text-sm font-semibold text-slate-200">Contas recentes</h2>
-              <p className="mt-0.5 text-xs text-slate-500">Identidade e presença no último inventário</p>
+              <h2 className="text-sm font-semibold text-slate-200">Contas recentes · com e sem persona</h2>
+              <p className="mt-0.5 text-xs text-slate-500">Inclui contas vinculadas e não vinculadas a uma persona.</p>
             </div>
             <Link href="/contas" className="text-xs text-info hover:underline">Ver todas</Link>
           </div>
@@ -398,4 +398,3 @@ function MetricCard({ label, value, detail, icon: Icon, href }: {
     </Link>
   );
 }
-
