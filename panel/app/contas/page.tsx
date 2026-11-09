@@ -15,9 +15,9 @@ import {
 
 const ACOES_APPRUNCLOUD = [
   { id: "instagram_whoami", label: "Verificar sessão Instagram", required: "sem parâmetros" },
-  { id: "like", label: "Curtir mídia", required: "media" },
-  { id: "save", label: "Salvar mídia", required: "media" },
-  { id: "comment", label: "Comentar em mídia", required: "media, text" },
+  { id: "like", label: "Curtir mídia", required: "media", targetKey: "media", targetLabel: "ID ou link da mídia" },
+  { id: "save", label: "Salvar mídia", required: "media", targetKey: "media", targetLabel: "ID ou link da mídia" },
+  { id: "comment", label: "Comentar em mídia", required: "media, text", targetKey: "media", targetLabel: "ID ou link da mídia" },
   { id: "follow", label: "Seguir perfil", required: "user" },
   { id: "unfollow", label: "Deixar de seguir perfil", required: "user" },
   { id: "direct_send", label: "Enviar mensagem direta", required: "text e exatamente um entre to ou thread" },
@@ -89,6 +89,7 @@ export default function Contas() {
   const [sel, setSel] = useState<Set<string>>(new Set());
   const [instanciasSelecionadas, setInstanciasSelecionadas] = useState<Set<string>>(new Set());
   const [acaoSelecionada, setAcaoSelecionada] = useState<string>("");
+  const [alvoAcao, setAlvoAcao] = useState("");
   const [parametrosJson, setParametrosJson] = useState("{}");
   const [erroPrevia, setErroPrevia] = useState<string | null>(null);
   const [previa, setPrevia] = useState<any>(null);
@@ -115,6 +116,11 @@ export default function Contas() {
   const facets = data?.facets ?? {};
   const inventario = extractInstances(inventarioData) ?? [];
   const acoesSelecionadasMeta = ACOES_APPRUNCLOUD.find((acao) => acao.id === acaoSelecionada);
+  const idInstanciaSelecionada = [...instanciasSelecionadas][0];
+  const instanciaSelecionada = inventario.find((instance, index) =>
+    (scalar(instance, ["id", "instance_id", "uuid"]) || `instância-${index + 1}`) === idInstanciaSelecionada,
+  );
+  const contaSelecionada = instanciaSelecionada ? handlesFromInstance(instanciaSelecionada).join(", ") : "";
   const contasPorHandle = useMemo(() => {
     const byHandle = new Map<string, Record<string, unknown>>();
     for (const account of vinculosData?.accounts ?? []) {
@@ -146,11 +152,16 @@ export default function Contas() {
     const acao = ACOES_APPRUNCLOUD.find((item) => item.id === acaoSelecionada);
     if (!acao) { setErroPrevia("Escolha uma operação para continuar."); return; }
     if (instanciasSelecionadas.size !== 1) { setErroPrevia("Selecione exatamente uma instância AppRunCloud."); return; }
-    let params: unknown;
+    let params: Record<string, unknown>;
     try {
-      params = JSON.parse(parametrosJson);
-      if (!params || typeof params !== "object" || Array.isArray(params)) throw new Error();
+      const parsed: unknown = JSON.parse(parametrosJson);
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error();
+      params = parsed as Record<string, unknown>;
     } catch { setErroPrevia("Os parâmetros precisam estar em formato JSON de objeto, por exemplo: { \"media\": \"...\" }"); return; }
+    if ("targetKey" in acao) {
+      if (!alvoAcao.trim()) { setErroPrevia(`Informe ${acao.targetLabel.toLocaleLowerCase("pt-BR")} para a prévia.`); return; }
+      params = { ...params, [acao.targetKey]: alvoAcao.trim() };
+    }
     const instanceId = [...instanciasSelecionadas][0];
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(instanceId)) {
       setErroPrevia("A instância selecionada não tem um identificador válido.");
@@ -196,7 +207,7 @@ export default function Contas() {
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <h2 className="flex items-center gap-2 text-sm font-semibold text-slate-200"><Server size={14} /> Instâncias AppRunCloud</h2>
-            <p className="mt-1 text-xs text-slate-500">Marque uma instância para montar uma chamada de prévia sem executar a ação.</p>
+            <p className="mt-1 text-xs text-slate-500">Selecione a conta e a instância que aparecerão na prévia. A seleção é de uma conta por vez.</p>
           </div>
           <button onClick={() => void reloadInventario()} disabled={inventarioLoading} className="btn-ghost">
             <RefreshCw size={12} className={inventarioLoading ? "animate-spin" : ""} /> Atualizar instâncias
@@ -226,7 +237,7 @@ export default function Contas() {
           <ShieldCheck size={16} className="mt-0.5 shrink-0 text-info" />
           <div>
             <h2 className="text-sm font-semibold text-slate-200">Ações AppRunCloud · modo de simulação</h2>
-            <p className="mt-1 text-xs text-slate-500">Escolha uma operação e uma instância. O Olimpo valida os parâmetros e descreve a chamada planejada; não a encaminha à AppRunCloud, então nada muda na conta ou no dispositivo.</p>
+            <p className="mt-1 text-xs text-slate-500">Escolha a operação, a mídia ou destino e a conta. O Olimpo valida e mostra a chamada planejada; a prévia não é encaminhada à AppRunCloud.</p>
           </div>
         </div>
         <div className="grid gap-3 md:grid-cols-[1fr_1fr]">
@@ -238,13 +249,17 @@ export default function Contas() {
             </select>
             {acoesSelecionadasMeta && <span className="mt-1 block text-[10px] text-slate-600">Parâmetros esperados: {acoesSelecionadasMeta.required}</span>}
           </label>
+          {acoesSelecionadasMeta && "targetKey" in acoesSelecionadasMeta && <label className="block">
+            <span className="label">{acoesSelecionadasMeta.targetLabel}</span>
+            <input className="input" value={alvoAcao} onChange={(event) => { setAlvoAcao(event.target.value); setPrevia(null); }} placeholder="Cole aqui o ID ou link da mídia" />
+          </label>}
           <label className="block">
             <span className="label">Parâmetros de exemplo (JSON)</span>
             <textarea className="input min-h-24 font-mono text-xs" value={parametrosJson} onChange={(event) => { setParametrosJson(event.target.value); setPrevia(null); }} spellCheck={false} />
           </label>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <span className="text-xs text-slate-500">{instanciasSelecionadas.size === 1 ? "1 instância selecionada" : "Selecione uma instância"}</span>
+          <span className="text-xs text-slate-500">{instanciasSelecionadas.size === 1 ? `Conta selecionada: ${contaSelecionada || "não identificada"} · 1 instância` : "Selecione uma conta/instância"}</span>
           <button onClick={() => void gerarPrevia()} disabled={!inventario.length || gerandoPrevia} className="btn-primary"><Play size={13} className={gerandoPrevia ? "animate-pulse" : ""} /> {gerandoPrevia ? "Validando prévia…" : "Pré-visualizar chamada"}</button>
           {instanciasSelecionadas.size > 0 && <button onClick={() => { setInstanciasSelecionadas(new Set()); setPrevia(null); }} className="btn-ghost">Limpar seleção</button>}
         </div>
@@ -607,3 +622,4 @@ function FormConta({ onDone }: { onDone: () => void }) {
     </div>
   );
 }
+
