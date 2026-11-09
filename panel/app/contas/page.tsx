@@ -88,6 +88,7 @@ export default function Contas() {
   const [page, setPage] = useState(1);
   const [sel, setSel] = useState<Set<string>>(new Set());
   const [instanciasSelecionadas, setInstanciasSelecionadas] = useState<Set<string>>(new Set());
+  const [buscaInstancia, setBuscaInstancia] = useState("");
   const [acaoSelecionada, setAcaoSelecionada] = useState<string>("");
   const [alvoAcao, setAlvoAcao] = useState("");
   const [parametrosJson, setParametrosJson] = useState("{}");
@@ -121,6 +122,16 @@ export default function Contas() {
     (scalar(instance, ["id", "instance_id", "uuid"]) || `instância-${index + 1}`) === idInstanciaSelecionada,
   );
   const contaSelecionada = instanciaSelecionada ? handlesFromInstance(instanciaSelecionada).join(", ") : "";
+  const instanciasFiltradas = useMemo(() => {
+    const busca = buscaInstancia.trim().toLocaleLowerCase("pt-BR");
+    if (!busca) return inventario;
+    return inventario.filter((instance) => [
+      scalar(instance, ["label", "name", "app_name"]),
+      scalar(instance, ["id", "instance_id", "uuid"]),
+      scalar(instance, ["state", "status", "connection_status"]),
+      ...handlesFromInstance(instance),
+    ].some((value) => value.toLocaleLowerCase("pt-BR").includes(busca)));
+  }, [inventario, buscaInstancia]);
   const contasPorHandle = useMemo(() => {
     const byHandle = new Map<string, Record<string, unknown>>();
     for (const account of vinculosData?.accounts ?? []) {
@@ -176,7 +187,12 @@ export default function Contas() {
         operation: acao.id,
         parameters: params,
       });
-      setPrevia(result);
+      const conta = contaSelecionada || scalar(instanciaSelecionada, ["label", "name", "app_name"]) || instanceId;
+      const detalheAlvo = "targetKey" in acao ? `, com destino ${String(params[acao.targetKey])}` : "";
+      const resumo = acao.id === "instagram_whoami"
+        ? `Prévia: consultar o estado da sessão Instagram da conta ${conta}. Essa consulta não faz login; esta tela apenas descreve a chamada e não a envia.`
+        : `Prévia: ${acao.label} pela conta ${conta}${detalheAlvo}. O JSON abaixo descreve a chamada planejada; nenhuma ação foi executada.`;
+      setPrevia({ ...result, human_summary: resumo });
     } catch (error) {
       setErroPrevia(error instanceof Error ? error.message : "Não foi possível gerar a prévia.");
     } finally {
@@ -206,8 +222,8 @@ export default function Contas() {
       <section className="card space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
-            <h2 className="flex items-center gap-2 text-sm font-semibold text-slate-200"><Server size={14} /> Instâncias AppRunCloud</h2>
-            <p className="mt-1 text-xs text-slate-500">Selecione a conta e a instância que aparecerão na prévia. A seleção é de uma conta por vez.</p>
+            <h2 className="flex items-center gap-2 text-sm font-semibold text-slate-200"><Server size={14} /> Selecionar conta</h2>
+            <p className="mt-1 text-xs text-slate-500">Pesquise por @usuário, nome do dispositivo ou ID. A prévia usa uma conta por vez.</p>
           </div>
           <button onClick={() => void reloadInventario()} disabled={inventarioLoading} className="btn-ghost">
             <RefreshCw size={12} className={inventarioLoading ? "animate-spin" : ""} /> Atualizar instâncias
@@ -216,19 +232,22 @@ export default function Contas() {
         {inventarioError ? <p role="alert" className="flex items-center gap-2 text-xs text-amber-200"><AlertTriangle size={13} /> Não foi possível carregar as instâncias AppRunCloud.</p>
           : inventarioLoading && inventario.length === 0 ? <p className="text-xs text-slate-500">Carregando instâncias…</p>
           : inventario.length === 0 ? <p className="text-xs text-slate-500">Nenhuma instância retornada.</p>
-          : <div className="overflow-x-auto"><table className="w-full min-w-[700px] text-left text-xs">
-            <thead className="text-[10px] uppercase tracking-wider text-slate-600"><tr><th className="w-8 py-2 pr-2">selecionar</th><th className="py-2 pr-3">Instância</th><th className="py-2 pr-3">Conta identificada</th><th className="py-2 pr-3">Persona</th><th className="py-2">Estado</th></tr></thead>
-            <tbody>{inventario.map((instance, index) => {
-              const id = scalar(instance, ["id", "instance_id", "uuid"]) || `instância-${index + 1}`;
-              const handles = handlesFromInstance(instance);
-              const linked = handles.map((handle) => ({ handle, account: contasPorHandle.get(normalizedHandle(handle)) })).filter((item) => item.account);
-              const accountLabel = handles.join(", ") || "Conta não identificada";
-              const personaLabels = [...new Set(linked.map(({ account }) => String(account?.persona_name ?? (account?.persona_id ? "Persona vinculada" : "Sem persona"))))];
-              const personaLabel = handles.length === 0 ? "Não foi possível conferir" : linked.length === 0 ? "Conta sem cadastro no Olimpo" : personaLabels.join(", ");
-              const state = scalar(instance, ["state", "status", "connection_status"]) || "Não informado";
-              return <tr key={id} className="border-t border-surface-border"><td className="py-2 pr-2"><input aria-label={`Selecionar instância ${id}`} type="radio" name="appruncloud-preview-instance" checked={instanciasSelecionadas.has(id)} onChange={() => alternarInstancia(id, true)} /></td><td className="py-2 pr-3"><span className="text-slate-200">{scalar(instance, ["label", "name", "app_name"]) || id}</span><span className="ml-2 font-mono text-[10px] text-slate-600">{id}</span></td><td className="py-2 pr-3 text-slate-300">{accountLabel}</td><td className="py-2 pr-3 text-slate-400">{personaLabel}</td><td className="py-2 text-slate-500">{state}</td></tr>;
-            })}</tbody>
-          </table></div>}
+          : <div className="space-y-2">
+            <label className="relative block"><Search size={14} className="absolute left-2.5 top-2.5 text-slate-600" /><input aria-label="Buscar conta ou instância" className="input !mt-0 pl-8" value={buscaInstancia} onChange={(event) => setBuscaInstancia(event.target.value)} placeholder="Buscar por usuário, dispositivo ou ID…" /></label>
+            <div className="max-h-64 overflow-y-auto rounded-md border border-surface-border">
+              {instanciasFiltradas.length === 0 ? <p className="p-3 text-xs text-slate-500">Nenhuma conta corresponde à busca.</p> : instanciasFiltradas.map((instance, index) => {
+                const id = scalar(instance, ["id", "instance_id", "uuid"]) || `instância-${index + 1}`;
+                const account = handlesFromInstance(instance).join(", ") || "Conta não identificada";
+                const device = scalar(instance, ["label", "name", "app_name"]) || "Dispositivo sem nome";
+                const state = scalar(instance, ["state", "status", "connection_status"]) || "Estado não informado";
+                const selected = instanciasSelecionadas.has(id);
+                return <button key={id} type="button" aria-pressed={selected} onClick={() => alternarInstancia(id, true)} className={`flex w-full items-center justify-between gap-3 border-b border-surface-border px-3 py-2 text-left last:border-b-0 ${selected ? "bg-info/10" : "hover:bg-surface-raised/60"}`}>
+                  <span className="min-w-0"><span className="block truncate text-xs text-slate-200">{account}</span><span className="block truncate text-[10px] text-slate-500">{device} · {state} · {id}</span></span><span className={`shrink-0 rounded border px-2 py-1 text-[10px] ${selected ? "border-info/40 text-info" : "border-surface-border text-slate-500"}`}>{selected ? "Selecionada" : "Selecionar"}</span>
+                </button>;
+              })}
+            </div>
+            <p className="text-[10px] text-slate-600">{instanciasFiltradas.length} de {inventario.length} contas/instâncias{instanciasSelecionadas.size === 1 ? ` · selecionada: ${contaSelecionada || "conta não identificada"}` : ""}</p>
+          </div>}
         {vinculosLoading && <p className="text-[10px] text-slate-600">Conferindo vínculos com personas…</p>}
       </section>
 
@@ -266,6 +285,7 @@ export default function Contas() {
         {erroPrevia && <p role="alert" className="text-xs text-amber-200">{erroPrevia}</p>}
         {previa && <div className="space-y-2 rounded-md border border-info/20 bg-info/5 p-3">
           <p className="text-xs font-medium text-info">Prévia do Olimpo · nenhum pedido enviado à AppRunCloud</p>
+          <p className="text-xs text-slate-200">{previa.human_summary}</p>
           <p className="text-[10px] text-slate-400">{previa.message} · instância {previa.instance_id}</p>
           <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-all rounded border border-surface-border bg-surface/50 p-2 text-[10px] text-slate-400">{JSON.stringify(previa.request, null, 2)}</pre>
         </div>}
