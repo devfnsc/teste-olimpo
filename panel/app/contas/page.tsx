@@ -13,31 +13,58 @@ import {
   STATUS, PRESENCA, AUTONOMIA, PLATAFORMA, ARQUETIPO, PAPEL, tempoRelativo,
 } from "@/lib/contas";
 
+type CampoAcao = { key: string; label: string; type: "text" | "number" | "boolean" | "json-object" | "json-array"; required?: boolean; multiline?: boolean; help?: string };
+const texto = (key: string, label: string, required = false, multiline = false, help?: string): CampoAcao => ({ key, label, type: "text", required, multiline, help });
+const numero = (key: string, label: string, help?: string): CampoAcao => ({ key, label, type: "number", help });
+const objeto = (key: string, label: string): CampoAcao => ({ key, label, type: "json-object" });
+const lista = (key: string, label: string): CampoAcao => ({ key, label, type: "json-array" });
+const booleano = (key: string, label: string): CampoAcao => ({ key, label, type: "boolean" });
+const storyExtras: CampoAcao[] = [lista("mentions", "Menções (JSON)"), lista("links", "Links (JSON)"), lista("hashtags", "Hashtags (JSON)"), lista("locations", "Localizações (JSON)"), lista("medias", "Mídias associadas (JSON)"), lista("stickers", "Figurinhas (JSON)"), lista("polls", "Enquetes (JSON)")];
+
 const ACOES_APPRUNCLOUD = [
-  { id: "instagram_whoami", label: "Verificar sessão Instagram", required: "sem parâmetros" },
-  { id: "like", label: "Curtir mídia", required: "media", targetKey: "media", targetLabel: "ID ou link da mídia" },
-  { id: "save", label: "Salvar mídia", required: "media", targetKey: "media", targetLabel: "ID ou link da mídia" },
-  { id: "comment", label: "Comentar em mídia", required: "media, text", targetKey: "media", targetLabel: "ID ou link da mídia" },
-  { id: "follow", label: "Seguir perfil", required: "user" },
-  { id: "unfollow", label: "Deixar de seguir perfil", required: "user" },
-  { id: "direct_send", label: "Enviar mensagem direta", required: "text e exatamente um entre to ou thread" },
-  { id: "photo_upload", label: "Publicar foto no feed", required: "file, caption" },
-  { id: "video_upload", label: "Publicar vídeo no feed", required: "file, caption" },
-  { id: "album_upload", label: "Publicar álbum", required: "files, caption" },
-  { id: "reel_upload", label: "Publicar Reel", required: "file, caption" },
-  { id: "photo_story", label: "Publicar Story de foto", required: "file" },
-  { id: "video_story", label: "Publicar Story de vídeo", required: "file" },
-  { id: "account_insights", label: "Consultar métricas da conta", required: "sem parâmetros" },
-  { id: "media_insights", label: "Consultar métricas da mídia", required: "media" },
-  { id: "media_info", label: "Consultar informações da mídia", required: "media" },
-  { id: "user_stories", label: "Consultar Stories do perfil", required: "user" },
-  { id: "story_seen", label: "Marcar Story como visto", required: "story_ids" },
-  { id: "reels_feed", label: "Consultar lista de Reels", required: "amount (opcional)" },
-  { id: "browse_reels", label: "Navegar Reels", required: "count e parâmetros de visualização (opcionais)" },
-  { id: "search_and_watch", label: "Buscar e assistir Reels", required: "query e parâmetros de visualização (opcionais)" },
-  { id: "device_run", label: "Consultar execução do dispositivo", required: "run_id" },
-  { id: "cancel_device_run", label: "Cancelar execução do dispositivo", required: "run_id" },
+  { id: "instagram_whoami", label: "Verificar sessão Instagram" },
+  { id: "like", label: "Curtir mídia" }, { id: "save", label: "Salvar mídia" },
+  { id: "comment", label: "Comentar em mídia" }, { id: "follow", label: "Seguir perfil" },
+  { id: "unfollow", label: "Deixar de seguir perfil" }, { id: "direct_send", label: "Enviar mensagem direta" },
+  { id: "photo_upload", label: "Publicar foto no feed" }, { id: "photo_upload_music", label: "Publicar foto no feed com música" },
+  { id: "video_upload", label: "Publicar vídeo no feed" }, { id: "album_upload", label: "Publicar álbum" },
+  { id: "album_upload_music", label: "Publicar álbum com música" }, { id: "reel_upload", label: "Publicar Reel" },
+  { id: "reel_upload_music", label: "Publicar Reel com música" }, { id: "reel_upload_reel_music", label: "Publicar Reel com música e áudio incorporado" },
+  { id: "photo_story", label: "Publicar Story de foto" }, { id: "photo_story_music", label: "Publicar Story de foto com música" },
+  { id: "video_story", label: "Publicar Story de vídeo" }, { id: "video_story_music", label: "Publicar Story de vídeo com música" },
+  { id: "account_insights", label: "Consultar métricas da conta" }, { id: "media_insights", label: "Consultar métricas da mídia" },
+  { id: "media_info", label: "Consultar informações da mídia" }, { id: "user_stories", label: "Consultar Stories do perfil" },
+  { id: "story_seen", label: "Marcar Story como visto" }, { id: "reels_feed", label: "Consultar lista de Reels" },
+  { id: "browse_reels", label: "Navegar Reels" }, { id: "search_and_watch", label: "Buscar e assistir Reels" },
+  { id: "device_run", label: "Consultar execução do dispositivo" }, { id: "cancel_device_run", label: "Cancelar execução do dispositivo" },
 ] as const;
+
+const CAMPOS_ACAO: Record<string, CampoAcao[]> = {
+  like: [texto("media", "Mídia: URL, shortcode ou ID", true)],
+  save: [texto("media", "Mídia: URL, shortcode ou ID", true)],
+  comment: [texto("media", "Mídia: URL, shortcode ou ID", true), texto("text", "Texto do comentário", true, true)],
+  follow: [texto("user", "Perfil: usuário ou ID", true)],
+  unfollow: [texto("user", "Perfil: usuário ou ID", true)],
+  direct_send: [texto("text", "Mensagem", true, true), texto("to", "Destinatário (usuário)"), texto("thread", "Ou ID da conversa")],
+  photo_upload: [texto("file", "Arquivo de imagem / URL", true), texto("caption", "Legenda", true, true), objeto("location", "Localização (JSON)"), lista("usertags", "Marcações (JSON)")],
+  photo_upload_music: [texto("file", "Arquivo de imagem / URL", true), texto("caption", "Legenda", true, true), texto("track", "Música (JSON da faixa)", true, true, "Cole o JSON de uma faixa retornada por music-search/music-search-v2 ou um music_canonical_id."), numero("music_start", "Início do trecho musical (ms)"), numero("music_duration", "Duração do trecho musical (ms)"), objeto("location", "Localização (JSON)"), lista("usertags", "Marcações (JSON)")],
+  video_upload: [texto("file", "Arquivo de vídeo / URL", true), texto("caption", "Legenda", true, true), texto("thumbnail", "Miniatura (opcional)"), objeto("location", "Localização (JSON)"), lista("usertags", "Marcações (JSON)")],
+  album_upload: [texto("files", "Arquivos: URLs separadas por vírgula", true, true), texto("caption", "Legenda", true, true), objeto("location", "Localização (JSON)")],
+  album_upload_music: [texto("files", "Arquivos: URLs separadas por vírgula", true, true), texto("caption", "Legenda", true, true), texto("track", "Música (JSON da faixa)", true, true, "Cole o JSON de uma faixa retornada por music-search/music-search-v2 ou um music_canonical_id."), numero("music_start", "Início do trecho musical (ms)"), numero("music_duration", "Duração do trecho musical (ms)"), objeto("location", "Localização (JSON)")],
+  reel_upload: [texto("file", "Arquivo de vídeo / URL", true), texto("caption", "Legenda", true, true), texto("thumbnail", "Miniatura (opcional)"), objeto("location", "Localização (JSON)"), lista("usertags", "Marcações (JSON)")],
+  reel_upload_music: [texto("file", "Arquivo de vídeo / URL", true), texto("caption", "Legenda", true, true), texto("track", "Música (JSON da faixa)", true, true, "Cole o JSON de uma faixa retornada por music-search/music-search-v2 ou um music_canonical_id."), numero("music_start", "Início do trecho musical (ms)"), numero("music_duration", "Duração do trecho musical (ms)"), numero("music_volume", "Volume da música (0–1)"), numero("original_volume", "Volume do áudio original (0–1)"), texto("thumbnail", "Miniatura (opcional)"), objeto("location", "Localização (JSON)"), lista("usertags", "Marcações (JSON)")],
+  reel_upload_reel_music: [texto("file", "Arquivo de vídeo / URL", true), texto("caption", "Legenda", true, true), texto("track", "Música (JSON da faixa)", true, true, "Cole o JSON de uma faixa retornada por music-search/music-search-v2 ou um music_canonical_id."), numero("music_start", "Início do trecho musical (ms)"), numero("music_duration", "Duração do trecho musical (ms)"), numero("music_volume", "Volume da música (0–1)"), numero("original_volume", "Volume do áudio original (0–1)"), texto("embed_audio", "Áudio incorporado"), texto("thumbnail", "Miniatura (opcional)"), objeto("location", "Localização (JSON)"), lista("usertags", "Marcações (JSON)")],
+  photo_story: [texto("file", "Arquivo de imagem / URL", true), texto("caption", "Legenda"), ...storyExtras],
+  photo_story_music: [texto("file", "Arquivo de imagem / URL", true), texto("track", "Música (JSON da faixa)", true, true, "Cole o JSON de uma faixa retornada por music-search/music-search-v2 ou um music_canonical_id."), texto("caption", "Legenda"), numero("duration", "Duração do Story (segundos)"), numero("music_start", "Início do trecho musical (ms)"), numero("music_volume", "Volume da música (0–1)"), ...storyExtras],
+  video_story: [texto("file", "Arquivo de vídeo / URL", true), texto("caption", "Legenda"), texto("thumbnail", "Miniatura (opcional)"), ...storyExtras],
+  video_story_music: [texto("file", "Arquivo de vídeo / URL", true), texto("track", "Música (JSON da faixa)", true, true, "Cole o JSON de uma faixa retornada por music-search/music-search-v2 ou um music_canonical_id."), texto("caption", "Legenda"), texto("thumbnail", "Miniatura (opcional)"), numero("music_start", "Início do trecho musical (ms)"), numero("music_volume", "Volume da música (0–1)"), numero("original_volume", "Volume do áudio original (0–1)"), ...storyExtras],
+  media_insights: [texto("media", "Mídia: URL, shortcode ou ID", true)], media_info: [texto("media", "Mídia: URL, shortcode ou ID", true)],
+  user_stories: [texto("user", "Perfil: usuário ou ID", true)], story_seen: [texto("story", "IDs de Stories separados por vírgula", true)],
+  reels_feed: [numero("amount", "Quantidade de Reels")],
+  browse_reels: [numero("count", "Quantidade de Reels"), numero("watch_min", "Tempo mínimo por Reel (s)"), numero("watch_max", "Tempo máximo por Reel (s)"), numero("max_seconds", "Tempo total máximo (s)"), numero("like_pct", "Chance de curtir (%)"), numero("max_likes", "Máximo de curtidas"), numero("repost_pct", "Chance de repostar (%)"), numero("max_reposts", "Máximo de reposts"), booleano("auto_start", "Iniciar dispositivo automaticamente")],
+  search_and_watch: [texto("query", "Termo de busca", true), numero("count", "Quantidade de Reels"), numero("watch_min", "Tempo mínimo por Reel (s)"), numero("watch_max", "Tempo máximo por Reel (s)"), numero("max_seconds", "Tempo total máximo (s)"), numero("like_pct", "Chance de curtir (%)"), numero("max_likes", "Máximo de curtidas"), numero("repost_pct", "Chance de repostar (%)"), numero("max_reposts", "Máximo de reposts"), booleano("auto_start", "Iniciar dispositivo automaticamente")],
+  device_run: [texto("run_id", "ID da execução", true)], cancel_device_run: [texto("run_id", "ID da execução", true)],
+};
 
 /**
  * Contas.
@@ -90,7 +117,9 @@ export default function Contas() {
   const [instanciasSelecionadas, setInstanciasSelecionadas] = useState<Set<string>>(new Set());
   const [buscaInstancia, setBuscaInstancia] = useState("");
   const [acaoSelecionada, setAcaoSelecionada] = useState<string>("");
-  const [alvoAcao, setAlvoAcao] = useState("");
+  const [valoresCampos, setValoresCampos] = useState<Record<string, string>>({});
+  const [atributosOpcionais, setAtributosOpcionais] = useState<Set<string>>(new Set());
+  const [novoAtributoOpcional, setNovoAtributoOpcional] = useState("");
   const [parametrosJson, setParametrosJson] = useState("{}");
   const [erroPrevia, setErroPrevia] = useState<string | null>(null);
   const [previa, setPrevia] = useState<any>(null);
@@ -117,6 +146,9 @@ export default function Contas() {
   const facets = data?.facets ?? {};
   const inventario = extractInstances(inventarioData) ?? [];
   const acoesSelecionadasMeta = ACOES_APPRUNCLOUD.find((acao) => acao.id === acaoSelecionada);
+  const camposAcao = CAMPOS_ACAO[acaoSelecionada] ?? [];
+  const camposVisiveis = camposAcao.filter((campo) => campo.required || atributosOpcionais.has(campo.key));
+  const camposOpcionaisDisponiveis = camposAcao.filter((campo) => !campo.required && !atributosOpcionais.has(campo.key));
   const idInstanciaSelecionada = [...instanciasSelecionadas][0];
   const instanciaSelecionada = inventario.find((instance, index) =>
     (scalar(instance, ["id", "instance_id", "uuid"]) || `instância-${index + 1}`) === idInstanciaSelecionada,
@@ -171,16 +203,38 @@ export default function Contas() {
     if (!acao) { setErroPrevia("Escolha uma operação para continuar."); return; }
     const instanceIds = [...instanciasSelecionadas];
     if (instanceIds.length === 0) { setErroPrevia("Selecione pelo menos uma conta/instância."); return; }
-    if (acao.id !== "instagram_whoami" && instanceIds.length !== 1) { setErroPrevia("Esta operação usa uma conta por prévia. Para selecionar várias, escolha Verificar sessão Instagram."); return; }
+    if (acao.id !== "instagram_whoami" && instanceIds.length !== 1) { setErroPrevia("Esta prévia aceita uma conta por vez para esta operação."); return; }
     let params: Record<string, unknown>;
     try {
       const parsed: unknown = JSON.parse(parametrosJson);
       if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error();
       params = parsed as Record<string, unknown>;
     } catch { setErroPrevia("Os parâmetros precisam estar em formato JSON de objeto, por exemplo: { \"media\": \"...\" }"); return; }
-    if ("targetKey" in acao) {
-      if (!alvoAcao.trim()) { setErroPrevia(`Informe ${acao.targetLabel.toLocaleLowerCase("pt-BR")} para a prévia.`); return; }
-      params = { ...params, [acao.targetKey]: alvoAcao.trim() };
+    for (const campo of camposVisiveis) {
+      const raw = (valoresCampos[campo.key] ?? "").trim();
+      if (!raw) {
+        if (campo.required) { setErroPrevia(`Preencha o campo obrigatório “${campo.label}”.`); return; }
+        continue;
+      }
+      if (campo.type === "number") {
+        const value = Number(raw);
+        if (!Number.isFinite(value)) { setErroPrevia(`“${campo.label}” precisa ser um número válido.`); return; }
+        params[campo.key] = value;
+      } else if (campo.type === "boolean") {
+        params[campo.key] = raw === "true";
+      } else if (campo.type === "json-object" || campo.type === "json-array") {
+        try {
+          const decoded: unknown = JSON.parse(raw);
+          const valid = campo.type === "json-object" ? !!decoded && typeof decoded === "object" && !Array.isArray(decoded) : Array.isArray(decoded);
+          if (!valid) throw new Error();
+        } catch { setErroPrevia(`“${campo.label}” precisa ser ${campo.type === "json-object" ? "um objeto" : "uma lista"} JSON válida.`); return; }
+        params[campo.key] = raw;
+      } else {
+        params[campo.key] = raw;
+      }
+    }
+    if (acao.id === "direct_send" && (!!params.to === !!params.thread)) {
+      setErroPrevia("Informe exatamente um destino para a mensagem: usuário ou ID da conversa."); return;
     }
     if (instanceIds.some((id) => !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id))) {
       setErroPrevia("Uma das instâncias selecionadas não tem um identificador válido.");
@@ -200,10 +254,10 @@ export default function Contas() {
           (scalar(instance, ["id", "instance_id", "uuid"]) || `instância-${index + 1}`) === instanceId,
         );
         const account = handlesFromInstance(selectedInstance ?? {}).join(", ") || scalar(selectedInstance, ["label", "name", "app_name"]) || instanceId;
-        const detalheAlvo = "targetKey" in acao ? `, com destino ${String(params[acao.targetKey])}` : "";
+        const alvo = params.media ? ` para a mídia ${String(params.media)}` : params.user ? ` para o perfil ${String(params.user)}` : "";
         const humanSummary = acao.id === "instagram_whoami"
           ? `Prévia: consultar o estado da sessão Instagram da conta ${account}. Essa consulta não faz login; esta tela apenas descreve a chamada e não a envia.`
-          : `Prévia: ${acao.label} pela conta ${account}${detalheAlvo}. O JSON abaixo descreve a chamada planejada; nenhuma ação foi executada.`;
+          : `Prévia: ${acao.label} pela conta ${account}${alvo}. O JSON abaixo descreve a chamada planejada; nenhuma ação foi executada.`;
         return { ...result, human_summary: humanSummary };
       }));
       setPrevia({ items });
@@ -271,24 +325,31 @@ export default function Contas() {
           <ShieldCheck size={16} className="mt-0.5 shrink-0 text-info" />
           <div>
             <h2 className="text-sm font-semibold text-slate-200">Ações AppRunCloud · modo de simulação</h2>
-            <p className="mt-1 text-xs text-slate-500">Escolha a operação, a mídia ou destino e a conta. O Olimpo valida e mostra a chamada planejada; a prévia não é encaminhada à AppRunCloud.</p>
+            <p className="mt-1 text-xs text-slate-500">Escolha a operação e preencha os campos reconhecidos no OpenAPI. O Olimpo só monta a prévia: não executa nem envia chamadas à AppRunCloud.</p>
           </div>
         </div>
         <div className="grid gap-3 md:grid-cols-[1fr_1fr]">
           <label className="block">
             <span className="label">Operação</span>
-            <select className="input" value={acaoSelecionada} onChange={(event) => { const nextAction = event.target.value; setAcaoSelecionada(nextAction); if (nextAction !== "instagram_whoami" && instanciasSelecionadas.size > 1) setInstanciasSelecionadas(new Set([[...instanciasSelecionadas][0]])); setPrevia(null); }}>
+            <select className="input" value={acaoSelecionada} onChange={(event) => { const nextAction = event.target.value; setAcaoSelecionada(nextAction); setValoresCampos({}); setAtributosOpcionais(new Set()); setNovoAtributoOpcional(""); setParametrosJson("{}"); if (nextAction !== "instagram_whoami" && instanciasSelecionadas.size > 1) setInstanciasSelecionadas(new Set([[...instanciasSelecionadas][0]])); setPrevia(null); }}>
               <option value="">Escolha uma operação…</option>
               {ACOES_APPRUNCLOUD.map((acao) => <option key={acao.id} value={acao.id}>{acao.label}</option>)}
             </select>
-            {acoesSelecionadasMeta && <span className="mt-1 block text-[10px] text-slate-600">Parâmetros esperados: {acoesSelecionadasMeta.required}</span>}
+            {acoesSelecionadasMeta && camposAcao.some((campo) => campo.required) && <span className="mt-1 block text-[10px] text-slate-600">Obrigatórios: {camposAcao.filter((campo) => campo.required).map((campo) => campo.key).join(", ")}</span>}
           </label>
-          {acoesSelecionadasMeta && "targetKey" in acoesSelecionadasMeta && <label className="block">
-            <span className="label">{acoesSelecionadasMeta.targetLabel}</span>
-            <input className="input" value={alvoAcao} onChange={(event) => { setAlvoAcao(event.target.value); setPrevia(null); }} placeholder="Cole aqui o ID ou link da mídia" />
-          </label>}
+          {camposVisiveis.map((campo) => <label key={campo.key} className="block">
+            <span className="label">{campo.label}{campo.required ? " · obrigatório" : ""}</span>
+            {campo.type === "boolean" ? <select aria-label={campo.label} className="input" value={valoresCampos[campo.key] ?? ""} onChange={(event) => { setValoresCampos((current) => ({ ...current, [campo.key]: event.target.value })); setPrevia(null); }}><option value="">Padrão da API</option><option value="true">Sim</option><option value="false">Não</option></select>
+              : campo.type === "json-object" || campo.type === "json-array" || campo.multiline ? <textarea aria-label={campo.label} className="input min-h-20 font-mono text-xs" value={valoresCampos[campo.key] ?? ""} placeholder={campo.type === "json-array" ? "[]" : campo.type === "json-object" ? "{}" : "Digite o texto…"} onChange={(event) => { setValoresCampos((current) => ({ ...current, [campo.key]: event.target.value })); setPrevia(null); }} spellCheck={false} />
+              : <input aria-label={campo.label} type={campo.type === "number" ? "number" : "text"} className="input" value={valoresCampos[campo.key] ?? ""} onChange={(event) => { setValoresCampos((current) => ({ ...current, [campo.key]: event.target.value })); setPrevia(null); }} />}
+            {campo.help && <span className="mt-1 block text-[10px] text-slate-600">{campo.help}</span>}
+          </label>)}
+          {camposOpcionaisDisponiveis.length > 0 && <div className="flex items-end gap-2">
+            <label className="block flex-1"><span className="label">Adicionar atributo opcional</span><select className="input" value={novoAtributoOpcional} onChange={(event) => setNovoAtributoOpcional(event.target.value)}><option value="">Escolha um atributo…</option>{camposOpcionaisDisponiveis.map((campo) => <option key={campo.key} value={campo.key}>{campo.label}</option>)}</select></label>
+            <button type="button" disabled={!novoAtributoOpcional} onClick={() => { setAtributosOpcionais((current) => new Set([...current, novoAtributoOpcional])); setNovoAtributoOpcional(""); setPrevia(null); }} className="btn-ghost">Adicionar</button>
+          </div>}
           <label className="block">
-            <span className="label">Parâmetros de exemplo (JSON)</span>
+            <span className="label">Outros atributos (JSON avançado)</span>
             <textarea className="input min-h-24 font-mono text-xs" value={parametrosJson} onChange={(event) => { setParametrosJson(event.target.value); setPrevia(null); }} spellCheck={false} />
           </label>
         </div>
@@ -300,6 +361,7 @@ export default function Contas() {
         {erroPrevia && <p role="alert" className="text-xs text-amber-200">{erroPrevia}</p>}
         {previa && <div className="space-y-2 rounded-md border border-info/20 bg-info/5 p-3">
           <p className="text-xs font-medium text-info">Prévia do Olimpo · nenhum pedido enviado à AppRunCloud</p>
+          <p className="text-[10px] text-slate-500">A API documenta a resposta no formato geral ok / data / net / trace opcional. Esta prévia não consulta nem inventa o resultado real.</p>
           {previa.items.map((item: any) => <div key={item.instance_id} className="space-y-2 rounded border border-surface-border p-2">
             <p className="text-xs text-slate-200">{item.human_summary}</p>
             <p className="text-[10px] text-slate-400">{item.message} · instância {item.instance_id}</p>
