@@ -154,7 +154,14 @@ export default function Contas() {
   }
 
   function alternarInstancia(id: string, marcada: boolean) {
-    setInstanciasSelecionadas(marcada ? new Set([id]) : new Set());
+    setInstanciasSelecionadas((current) => {
+      if (acaoSelecionada === "instagram_whoami") {
+        const next = new Set(current);
+        if (marcada) next.add(id); else next.delete(id);
+        return next;
+      }
+      return marcada ? new Set([id]) : new Set();
+    });
     setPrevia(null);
   }
 
@@ -162,7 +169,9 @@ export default function Contas() {
     setErroPrevia(null);
     const acao = ACOES_APPRUNCLOUD.find((item) => item.id === acaoSelecionada);
     if (!acao) { setErroPrevia("Escolha uma operação para continuar."); return; }
-    if (instanciasSelecionadas.size !== 1) { setErroPrevia("Selecione exatamente uma instância AppRunCloud."); return; }
+    const instanceIds = [...instanciasSelecionadas];
+    if (instanceIds.length === 0) { setErroPrevia("Selecione pelo menos uma conta/instância."); return; }
+    if (acao.id !== "instagram_whoami" && instanceIds.length !== 1) { setErroPrevia("Esta operação usa uma conta por prévia. Para selecionar várias, escolha Verificar sessão Instagram."); return; }
     let params: Record<string, unknown>;
     try {
       const parsed: unknown = JSON.parse(parametrosJson);
@@ -173,26 +182,31 @@ export default function Contas() {
       if (!alvoAcao.trim()) { setErroPrevia(`Informe ${acao.targetLabel.toLocaleLowerCase("pt-BR")} para a prévia.`); return; }
       params = { ...params, [acao.targetKey]: alvoAcao.trim() };
     }
-    const instanceId = [...instanciasSelecionadas][0];
-    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(instanceId)) {
-      setErroPrevia("A instância selecionada não tem um identificador válido.");
+    if (instanceIds.some((id) => !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id))) {
+      setErroPrevia("Uma das instâncias selecionadas não tem um identificador válido.");
       return;
     }
     setGerandoPrevia(true);
     setPrevia(null);
     try {
-      const result = await mutate("/v1/integrations/appruncloud/actions/preview", "POST", {
-        dry_run: true,
-        instance_id: instanceId,
-        operation: acao.id,
-        parameters: params,
-      });
-      const conta = contaSelecionada || scalar(instanciaSelecionada, ["label", "name", "app_name"]) || instanceId;
-      const detalheAlvo = "targetKey" in acao ? `, com destino ${String(params[acao.targetKey])}` : "";
-      const resumo = acao.id === "instagram_whoami"
-        ? `Prévia: consultar o estado da sessão Instagram da conta ${conta}. Essa consulta não faz login; esta tela apenas descreve a chamada e não a envia.`
-        : `Prévia: ${acao.label} pela conta ${conta}${detalheAlvo}. O JSON abaixo descreve a chamada planejada; nenhuma ação foi executada.`;
-      setPrevia({ ...result, human_summary: resumo });
+      const items = await Promise.all(instanceIds.map(async (instanceId) => {
+        const result = await mutate("/v1/integrations/appruncloud/actions/preview", "POST", {
+          dry_run: true,
+          instance_id: instanceId,
+          operation: acao.id,
+          parameters: params,
+        });
+        const selectedInstance = inventario.find((instance, index) =>
+          (scalar(instance, ["id", "instance_id", "uuid"]) || `instância-${index + 1}`) === instanceId,
+        );
+        const account = handlesFromInstance(selectedInstance ?? {}).join(", ") || scalar(selectedInstance, ["label", "name", "app_name"]) || instanceId;
+        const detalheAlvo = "targetKey" in acao ? `, com destino ${String(params[acao.targetKey])}` : "";
+        const humanSummary = acao.id === "instagram_whoami"
+          ? `Prévia: consultar o estado da sessão Instagram da conta ${account}. Essa consulta não faz login; esta tela apenas descreve a chamada e não a envia.`
+          : `Prévia: ${acao.label} pela conta ${account}${detalheAlvo}. O JSON abaixo descreve a chamada planejada; nenhuma ação foi executada.`;
+        return { ...result, human_summary: humanSummary };
+      }));
+      setPrevia({ items });
     } catch (error) {
       setErroPrevia(error instanceof Error ? error.message : "Não foi possível gerar a prévia.");
     } finally {
@@ -223,7 +237,7 @@ export default function Contas() {
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <h2 className="flex items-center gap-2 text-sm font-semibold text-slate-200"><Server size={14} /> Selecionar conta</h2>
-            <p className="mt-1 text-xs text-slate-500">Pesquise por @usuário, nome do dispositivo ou ID. A prévia usa uma conta por vez.</p>
+            <p className="mt-1 text-xs text-slate-500">Pesquise por @usuário, nome do dispositivo ou ID. A consulta de sessão aceita várias contas; as outras prévias usam uma por vez.</p>
           </div>
           <button onClick={() => void reloadInventario()} disabled={inventarioLoading} className="btn-ghost">
             <RefreshCw size={12} className={inventarioLoading ? "animate-spin" : ""} /> Atualizar instâncias
@@ -234,6 +248,7 @@ export default function Contas() {
           : inventario.length === 0 ? <p className="text-xs text-slate-500">Nenhuma instância retornada.</p>
           : <div className="space-y-2">
             <label className="relative block"><Search size={14} className="absolute left-2.5 top-2.5 text-slate-600" /><input aria-label="Buscar conta ou instância" className="input !mt-0 pl-8" value={buscaInstancia} onChange={(event) => setBuscaInstancia(event.target.value)} placeholder="Buscar por usuário, dispositivo ou ID…" /></label>
+            {acaoSelecionada === "instagram_whoami" && <div className="flex gap-2"><button type="button" onClick={() => { setInstanciasSelecionadas(new Set(instanciasFiltradas.map((instance, index) => scalar(instance, ["id", "instance_id", "uuid"]) || `instância-${index + 1}`))); setPrevia(null); }} className="btn-ghost !py-1 text-[10px]">Selecionar resultados da busca</button><button type="button" onClick={() => { setInstanciasSelecionadas(new Set()); setPrevia(null); }} className="btn-ghost !py-1 text-[10px]">Limpar seleção</button></div>}
             <div className="max-h-64 overflow-y-auto rounded-md border border-surface-border">
               {instanciasFiltradas.length === 0 ? <p className="p-3 text-xs text-slate-500">Nenhuma conta corresponde à busca.</p> : instanciasFiltradas.map((instance, index) => {
                 const id = scalar(instance, ["id", "instance_id", "uuid"]) || `instância-${index + 1}`;
@@ -241,12 +256,12 @@ export default function Contas() {
                 const device = scalar(instance, ["label", "name", "app_name"]) || "Dispositivo sem nome";
                 const state = scalar(instance, ["state", "status", "connection_status"]) || "Estado não informado";
                 const selected = instanciasSelecionadas.has(id);
-                return <button key={id} type="button" aria-pressed={selected} onClick={() => alternarInstancia(id, true)} className={`flex w-full items-center justify-between gap-3 border-b border-surface-border px-3 py-2 text-left last:border-b-0 ${selected ? "bg-info/10" : "hover:bg-surface-raised/60"}`}>
-                  <span className="min-w-0"><span className="block truncate text-xs text-slate-200">{account}</span><span className="block truncate text-[10px] text-slate-500">{device} · {state} · {id}</span></span><span className={`shrink-0 rounded border px-2 py-1 text-[10px] ${selected ? "border-info/40 text-info" : "border-surface-border text-slate-500"}`}>{selected ? "Selecionada" : "Selecionar"}</span>
+                return <button key={id} type="button" aria-pressed={selected} onClick={() => alternarInstancia(id, !selected)} className={`flex w-full items-center justify-between gap-3 border-b border-surface-border px-3 py-2 text-left last:border-b-0 ${selected ? "bg-info/10" : "hover:bg-surface-raised/60"}`}>
+                  <span className="min-w-0"><span className="block truncate text-xs text-slate-200">{account}</span><span className="block truncate text-[10px] text-slate-500">{device} · {state} · {id}</span></span><span className={`shrink-0 rounded border px-2 py-1 text-[10px] ${selected ? "border-info/40 text-info" : "border-surface-border text-slate-500"}`}>{selected ? "Selecionada · remover" : "Selecionar"}</span>
                 </button>;
               })}
             </div>
-            <p className="text-[10px] text-slate-600">{instanciasFiltradas.length} de {inventario.length} contas/instâncias{instanciasSelecionadas.size === 1 ? ` · selecionada: ${contaSelecionada || "conta não identificada"}` : ""}</p>
+            <p className="text-[10px] text-slate-600">{instanciasFiltradas.length} de {inventario.length} contas/instâncias · {instanciasSelecionadas.size} selecionada(s){instanciasSelecionadas.size === 1 ? `: ${contaSelecionada || "conta não identificada"}` : ""}</p>
           </div>}
         {vinculosLoading && <p className="text-[10px] text-slate-600">Conferindo vínculos com personas…</p>}
       </section>
@@ -262,7 +277,7 @@ export default function Contas() {
         <div className="grid gap-3 md:grid-cols-[1fr_1fr]">
           <label className="block">
             <span className="label">Operação</span>
-            <select className="input" value={acaoSelecionada} onChange={(event) => { setAcaoSelecionada(event.target.value); setPrevia(null); }}>
+            <select className="input" value={acaoSelecionada} onChange={(event) => { const nextAction = event.target.value; setAcaoSelecionada(nextAction); if (nextAction !== "instagram_whoami" && instanciasSelecionadas.size > 1) setInstanciasSelecionadas(new Set([[...instanciasSelecionadas][0]])); setPrevia(null); }}>
               <option value="">Escolha uma operação…</option>
               {ACOES_APPRUNCLOUD.map((acao) => <option key={acao.id} value={acao.id}>{acao.label}</option>)}
             </select>
@@ -278,16 +293,18 @@ export default function Contas() {
           </label>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <span className="text-xs text-slate-500">{instanciasSelecionadas.size === 1 ? `Conta selecionada: ${contaSelecionada || "não identificada"} · 1 instância` : "Selecione uma conta/instância"}</span>
+          <span className="text-xs text-slate-500">{instanciasSelecionadas.size > 0 ? `${instanciasSelecionadas.size} conta(s) selecionada(s)` : "Selecione uma conta/instância"}</span>
           <button onClick={() => void gerarPrevia()} disabled={!inventario.length || gerandoPrevia} className="btn-primary"><Play size={13} className={gerandoPrevia ? "animate-pulse" : ""} /> {gerandoPrevia ? "Validando prévia…" : "Pré-visualizar chamada"}</button>
           {instanciasSelecionadas.size > 0 && <button onClick={() => { setInstanciasSelecionadas(new Set()); setPrevia(null); }} className="btn-ghost">Limpar seleção</button>}
         </div>
         {erroPrevia && <p role="alert" className="text-xs text-amber-200">{erroPrevia}</p>}
         {previa && <div className="space-y-2 rounded-md border border-info/20 bg-info/5 p-3">
           <p className="text-xs font-medium text-info">Prévia do Olimpo · nenhum pedido enviado à AppRunCloud</p>
-          <p className="text-xs text-slate-200">{previa.human_summary}</p>
-          <p className="text-[10px] text-slate-400">{previa.message} · instância {previa.instance_id}</p>
-          <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-all rounded border border-surface-border bg-surface/50 p-2 text-[10px] text-slate-400">{JSON.stringify(previa.request, null, 2)}</pre>
+          {previa.items.map((item: any) => <div key={item.instance_id} className="space-y-2 rounded border border-surface-border p-2">
+            <p className="text-xs text-slate-200">{item.human_summary}</p>
+            <p className="text-[10px] text-slate-400">{item.message} · instância {item.instance_id}</p>
+            <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-all rounded border border-surface-border bg-surface/50 p-2 text-[10px] text-slate-400">{JSON.stringify(item.request, null, 2)}</pre>
+          </div>)}
         </div>}
       </section>
 
