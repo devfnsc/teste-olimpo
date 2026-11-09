@@ -44,11 +44,17 @@ _PREVIEW_ACTIONS: dict[str, tuple[str, str]] = {
     "unfollow": ("POST", "/v1/instances/{instance_id}/instagram/engage/unfollow"),
     "direct_send": ("POST", "/v1/instances/{instance_id}/instagram/engage/direct-send"),
     "photo_upload": ("POST", "/v1/instances/{instance_id}/instagram/engage/photo-upload"),
+    "photo_upload_music": ("POST", "/v1/instances/{instance_id}/instagram/engage/photo-upload-music"),
     "video_upload": ("POST", "/v1/instances/{instance_id}/instagram/engage/video-upload"),
     "album_upload": ("POST", "/v1/instances/{instance_id}/instagram/engage/album-upload"),
+    "album_upload_music": ("POST", "/v1/instances/{instance_id}/instagram/engage/album-upload-music"),
     "reel_upload": ("POST", "/v1/instances/{instance_id}/instagram/engage/clip-upload"),
+    "reel_upload_music": ("POST", "/v1/instances/{instance_id}/instagram/engage/clip-upload-music"),
+    "reel_upload_reel_music": ("POST", "/v1/instances/{instance_id}/instagram/engage/clip-upload-reel-music"),
     "photo_story": ("POST", "/v1/instances/{instance_id}/instagram/engage/photo-to-story"),
+    "photo_story_music": ("POST", "/v1/instances/{instance_id}/instagram/engage/photo-to-story-music"),
     "video_story": ("POST", "/v1/instances/{instance_id}/instagram/engage/video-to-story"),
+    "video_story_music": ("POST", "/v1/instances/{instance_id}/instagram/engage/video-to-story-music"),
     "account_insights": ("POST", "/v1/instances/{instance_id}/instagram/engage/insights-account"),
     "media_insights": ("POST", "/v1/instances/{instance_id}/instagram/engage/insights-media"),
     "media_info": ("POST", "/v1/instances/{instance_id}/instagram/engage/media-info"),
@@ -306,3 +312,4 @@ async def get_instance_device(instance_id: UUID) -> dict:
     """Consulta informações e estado do device."""
     client = _client()
     return await _read(client.device(str(instance_id)))
+
