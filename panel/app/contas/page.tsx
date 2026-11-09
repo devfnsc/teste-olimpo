@@ -5,13 +5,39 @@ import Link from "next/link";
 import useSWR from "swr";
 import {
   Search, Plus, ChevronLeft, ChevronRight, Users, Link2, HelpCircle,
-  StickyNote, Smartphone, Server, RefreshCw, AlertTriangle,
+  StickyNote, Smartphone, Server, RefreshCw, AlertTriangle, Play, ShieldCheck,
 } from "lucide-react";
 import { api, mutate } from "@/lib/api";
 import { extractAccounts, extractInstances, type AppRunCloudRecord } from "@/lib/appruncloud";
 import {
   STATUS, PRESENCA, AUTONOMIA, PLATAFORMA, ARQUETIPO, PAPEL, tempoRelativo,
 } from "@/lib/contas";
+
+const ACOES_APPRUNCLOUD = [
+  { id: "instagram_whoami", label: "Verificar sessão Instagram", required: "sem parâmetros" },
+  { id: "like", label: "Curtir mídia", required: "media" },
+  { id: "save", label: "Salvar mídia", required: "media" },
+  { id: "comment", label: "Comentar em mídia", required: "media, text" },
+  { id: "follow", label: "Seguir perfil", required: "user" },
+  { id: "unfollow", label: "Deixar de seguir perfil", required: "user" },
+  { id: "direct_send", label: "Enviar mensagem direta", required: "text e exatamente um entre to ou thread" },
+  { id: "photo_upload", label: "Publicar foto no feed", required: "file, caption" },
+  { id: "video_upload", label: "Publicar vídeo no feed", required: "file, caption" },
+  { id: "album_upload", label: "Publicar álbum", required: "files, caption" },
+  { id: "reel_upload", label: "Publicar Reel", required: "file, caption" },
+  { id: "photo_story", label: "Publicar Story de foto", required: "file" },
+  { id: "video_story", label: "Publicar Story de vídeo", required: "file" },
+  { id: "account_insights", label: "Consultar métricas da conta", required: "sem parâmetros" },
+  { id: "media_insights", label: "Consultar métricas da mídia", required: "media" },
+  { id: "media_info", label: "Consultar informações da mídia", required: "media" },
+  { id: "user_stories", label: "Consultar Stories do perfil", required: "user" },
+  { id: "story_seen", label: "Marcar Story como visto", required: "story_ids" },
+  { id: "reels_feed", label: "Consultar lista de Reels", required: "amount (opcional)" },
+  { id: "browse_reels", label: "Navegar Reels", required: "count e parâmetros de visualização (opcionais)" },
+  { id: "search_and_watch", label: "Buscar e assistir Reels", required: "query e parâmetros de visualização (opcionais)" },
+  { id: "device_run", label: "Consultar execução do dispositivo", required: "run_id" },
+  { id: "cancel_device_run", label: "Cancelar execução do dispositivo", required: "run_id" },
+] as const;
 
 /**
  * Contas.
@@ -61,6 +87,12 @@ export default function Contas() {
   const [filtros, setFiltros] = useState<Record<string, string>>({});
   const [page, setPage] = useState(1);
   const [sel, setSel] = useState<Set<string>>(new Set());
+  const [instanciasSelecionadas, setInstanciasSelecionadas] = useState<Set<string>>(new Set());
+  const [acaoSelecionada, setAcaoSelecionada] = useState<string>("");
+  const [parametrosJson, setParametrosJson] = useState("{}");
+  const [erroPrevia, setErroPrevia] = useState<string | null>(null);
+  const [previa, setPrevia] = useState<any>(null);
+  const [gerandoPrevia, setGerandoPrevia] = useState(false);
   const [novo, setNovo] = useState(false);
 
   const query = useMemo(() => {
@@ -82,6 +114,7 @@ export default function Contas() {
   const contas = data?.accounts ?? [];
   const facets = data?.facets ?? {};
   const inventario = extractInstances(inventarioData) ?? [];
+  const acoesSelecionadasMeta = ACOES_APPRUNCLOUD.find((acao) => acao.id === acaoSelecionada);
   const contasPorHandle = useMemo(() => {
     const byHandle = new Map<string, Record<string, unknown>>();
     for (const account of vinculosData?.accounts ?? []) {
@@ -101,6 +134,43 @@ export default function Contas() {
     await mutate("/v1/accounts/bulk", "POST", { ids: [...sel], action, value });
     setSel(new Set());
     reload();
+  }
+
+  function alternarInstancia(id: string, marcada: boolean) {
+    setInstanciasSelecionadas(marcada ? new Set([id]) : new Set());
+    setPrevia(null);
+  }
+
+  async function gerarPrevia() {
+    setErroPrevia(null);
+    const acao = ACOES_APPRUNCLOUD.find((item) => item.id === acaoSelecionada);
+    if (!acao) { setErroPrevia("Escolha uma operação para continuar."); return; }
+    if (instanciasSelecionadas.size !== 1) { setErroPrevia("Selecione exatamente uma instância AppRunCloud."); return; }
+    let params: unknown;
+    try {
+      params = JSON.parse(parametrosJson);
+      if (!params || typeof params !== "object" || Array.isArray(params)) throw new Error();
+    } catch { setErroPrevia("Os parâmetros precisam estar em formato JSON de objeto, por exemplo: { \"media\": \"...\" }"); return; }
+    const instanceId = [...instanciasSelecionadas][0];
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(instanceId)) {
+      setErroPrevia("A instância selecionada não tem um identificador válido.");
+      return;
+    }
+    setGerandoPrevia(true);
+    setPrevia(null);
+    try {
+      const result = await mutate("/v1/integrations/appruncloud/actions/preview", "POST", {
+        dry_run: true,
+        instance_id: instanceId,
+        operation: acao.id,
+        parameters: params,
+      });
+      setPrevia(result);
+    } catch (error) {
+      setErroPrevia(error instanceof Error ? error.message : "Não foi possível gerar a prévia.");
+    } finally {
+      setGerandoPrevia(false);
+    }
   }
 
   return (
@@ -126,7 +196,7 @@ export default function Contas() {
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <h2 className="flex items-center gap-2 text-sm font-semibold text-slate-200"><Server size={14} /> Instâncias AppRunCloud</h2>
-            <p className="mt-1 text-xs text-slate-500">Vínculo da instância com uma conta cadastrada e sua persona no Olimpo.</p>
+            <p className="mt-1 text-xs text-slate-500">Marque uma instância para montar uma chamada de prévia sem executar a ação.</p>
           </div>
           <button onClick={() => void reloadInventario()} disabled={inventarioLoading} className="btn-ghost">
             <RefreshCw size={12} className={inventarioLoading ? "animate-spin" : ""} /> Atualizar instâncias
@@ -136,7 +206,7 @@ export default function Contas() {
           : inventarioLoading && inventario.length === 0 ? <p className="text-xs text-slate-500">Carregando instâncias…</p>
           : inventario.length === 0 ? <p className="text-xs text-slate-500">Nenhuma instância retornada.</p>
           : <div className="overflow-x-auto"><table className="w-full min-w-[700px] text-left text-xs">
-            <thead className="text-[10px] uppercase tracking-wider text-slate-600"><tr><th className="py-2 pr-3">Instância</th><th className="py-2 pr-3">Conta identificada</th><th className="py-2 pr-3">Persona</th><th className="py-2">Estado</th></tr></thead>
+            <thead className="text-[10px] uppercase tracking-wider text-slate-600"><tr><th className="w-8 py-2 pr-2">selecionar</th><th className="py-2 pr-3">Instância</th><th className="py-2 pr-3">Conta identificada</th><th className="py-2 pr-3">Persona</th><th className="py-2">Estado</th></tr></thead>
             <tbody>{inventario.map((instance, index) => {
               const id = scalar(instance, ["id", "instance_id", "uuid"]) || `instância-${index + 1}`;
               const handles = handlesFromInstance(instance);
@@ -145,10 +215,45 @@ export default function Contas() {
               const personaLabels = [...new Set(linked.map(({ account }) => String(account?.persona_name ?? (account?.persona_id ? "Persona vinculada" : "Sem persona"))))];
               const personaLabel = handles.length === 0 ? "Não foi possível conferir" : linked.length === 0 ? "Conta sem cadastro no Olimpo" : personaLabels.join(", ");
               const state = scalar(instance, ["state", "status", "connection_status"]) || "Não informado";
-              return <tr key={id} className="border-t border-surface-border"><td className="py-2 pr-3"><span className="text-slate-200">{scalar(instance, ["label", "name", "app_name"]) || id}</span><span className="ml-2 font-mono text-[10px] text-slate-600">{id}</span></td><td className="py-2 pr-3 text-slate-300">{accountLabel}</td><td className="py-2 pr-3 text-slate-400">{personaLabel}</td><td className="py-2 text-slate-500">{state}</td></tr>;
+              return <tr key={id} className="border-t border-surface-border"><td className="py-2 pr-2"><input aria-label={`Selecionar instância ${id}`} type="radio" name="appruncloud-preview-instance" checked={instanciasSelecionadas.has(id)} onChange={() => alternarInstancia(id, true)} /></td><td className="py-2 pr-3"><span className="text-slate-200">{scalar(instance, ["label", "name", "app_name"]) || id}</span><span className="ml-2 font-mono text-[10px] text-slate-600">{id}</span></td><td className="py-2 pr-3 text-slate-300">{accountLabel}</td><td className="py-2 pr-3 text-slate-400">{personaLabel}</td><td className="py-2 text-slate-500">{state}</td></tr>;
             })}</tbody>
           </table></div>}
         {vinculosLoading && <p className="text-[10px] text-slate-600">Conferindo vínculos com personas…</p>}
+      </section>
+
+      <section className="card space-y-3">
+        <div className="flex items-start gap-2">
+          <ShieldCheck size={16} className="mt-0.5 shrink-0 text-info" />
+          <div>
+            <h2 className="text-sm font-semibold text-slate-200">Ações AppRunCloud · modo de simulação</h2>
+            <p className="mt-1 text-xs text-slate-500">Escolha uma operação e uma instância. O Olimpo valida os parâmetros e descreve a chamada planejada; não a encaminha à AppRunCloud, então nada muda na conta ou no dispositivo.</p>
+          </div>
+        </div>
+        <div className="grid gap-3 md:grid-cols-[1fr_1fr]">
+          <label className="block">
+            <span className="label">Operação</span>
+            <select className="input" value={acaoSelecionada} onChange={(event) => { setAcaoSelecionada(event.target.value); setPrevia(null); }}>
+              <option value="">Escolha uma operação…</option>
+              {ACOES_APPRUNCLOUD.map((acao) => <option key={acao.id} value={acao.id}>{acao.label}</option>)}
+            </select>
+            {acoesSelecionadasMeta && <span className="mt-1 block text-[10px] text-slate-600">Parâmetros esperados: {acoesSelecionadasMeta.required}</span>}
+          </label>
+          <label className="block">
+            <span className="label">Parâmetros de exemplo (JSON)</span>
+            <textarea className="input min-h-24 font-mono text-xs" value={parametrosJson} onChange={(event) => { setParametrosJson(event.target.value); setPrevia(null); }} spellCheck={false} />
+          </label>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-xs text-slate-500">{instanciasSelecionadas.size === 1 ? "1 instância selecionada" : "Selecione uma instância"}</span>
+          <button onClick={() => void gerarPrevia()} disabled={!inventario.length || gerandoPrevia} className="btn-primary"><Play size={13} className={gerandoPrevia ? "animate-pulse" : ""} /> {gerandoPrevia ? "Validando prévia…" : "Pré-visualizar chamada"}</button>
+          {instanciasSelecionadas.size > 0 && <button onClick={() => { setInstanciasSelecionadas(new Set()); setPrevia(null); }} className="btn-ghost">Limpar seleção</button>}
+        </div>
+        {erroPrevia && <p role="alert" className="text-xs text-amber-200">{erroPrevia}</p>}
+        {previa && <div className="space-y-2 rounded-md border border-info/20 bg-info/5 p-3">
+          <p className="text-xs font-medium text-info">Prévia do Olimpo · nenhum pedido enviado à AppRunCloud</p>
+          <p className="text-[10px] text-slate-400">{previa.message} · instância {previa.instance_id}</p>
+          <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-all rounded border border-surface-border bg-surface/50 p-2 text-[10px] text-slate-400">{JSON.stringify(previa.request, null, 2)}</pre>
+        </div>}
       </section>
 
       {novo && <FormConta onDone={() => { setNovo(false); reload(); }} />}

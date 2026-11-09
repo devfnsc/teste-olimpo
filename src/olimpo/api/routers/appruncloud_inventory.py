@@ -14,7 +14,7 @@ from typing import Any
 from uuid import UUID
 
 import structlog
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Body, HTTPException, Query
 
 from olimpo.integrations.appruncloud import (
     AppRunCloudClient,
@@ -32,6 +32,34 @@ _UUID_PATTERN = re.compile(
     r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b"
 )
 _API_KEY_PATTERN = re.compile(r"\bark_[A-Za-z0-9_-]+\b")
+
+# These routes are only described by the preview endpoint below. They are
+# never requested from AppRunCloud by that endpoint.
+_PREVIEW_ACTIONS: dict[str, tuple[str, str]] = {
+    "instagram_whoami": ("POST", "/v1/instances/{instance_id}/instagram/engage/whoami"),
+    "like": ("POST", "/v1/instances/{instance_id}/instagram/engage/like"),
+    "save": ("POST", "/v1/instances/{instance_id}/instagram/engage/save"),
+    "comment": ("POST", "/v1/instances/{instance_id}/instagram/engage/comment"),
+    "follow": ("POST", "/v1/instances/{instance_id}/instagram/engage/follow"),
+    "unfollow": ("POST", "/v1/instances/{instance_id}/instagram/engage/unfollow"),
+    "direct_send": ("POST", "/v1/instances/{instance_id}/instagram/engage/direct-send"),
+    "photo_upload": ("POST", "/v1/instances/{instance_id}/instagram/engage/photo-upload"),
+    "video_upload": ("POST", "/v1/instances/{instance_id}/instagram/engage/video-upload"),
+    "album_upload": ("POST", "/v1/instances/{instance_id}/instagram/engage/album-upload"),
+    "reel_upload": ("POST", "/v1/instances/{instance_id}/instagram/engage/clip-upload"),
+    "photo_story": ("POST", "/v1/instances/{instance_id}/instagram/engage/photo-to-story"),
+    "video_story": ("POST", "/v1/instances/{instance_id}/instagram/engage/video-to-story"),
+    "account_insights": ("POST", "/v1/instances/{instance_id}/instagram/engage/insights-account"),
+    "media_insights": ("POST", "/v1/instances/{instance_id}/instagram/engage/insights-media"),
+    "media_info": ("POST", "/v1/instances/{instance_id}/instagram/engage/media-info"),
+    "user_stories": ("POST", "/v1/instances/{instance_id}/instagram/engage/user-stories"),
+    "story_seen": ("POST", "/v1/instances/{instance_id}/instagram/engage/story-seen"),
+    "reels_feed": ("POST", "/v1/instances/{instance_id}/instagram/engage/reels"),
+    "browse_reels": ("POST", "/v1/instances/{instance_id}/instagram/device/browse_reels"),
+    "search_and_watch": ("POST", "/v1/instances/{instance_id}/instagram/device/search_and_watch"),
+    "device_run": ("GET", "/v1/instances/{instance_id}/instagram/device/run"),
+    "cancel_device_run": ("POST", "/v1/instances/{instance_id}/instagram/device/run/cancel"),
+}
 
 
 def _safe_upstream_detail(value: str | None) -> str | None:
@@ -214,6 +242,51 @@ async def list_instances(
     return result
 
 
+@router.post("/actions/preview")
+async def preview_action(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+    """Validates and describes a single-instance request without dispatching it."""
+    if payload.get("dry_run") is not True:
+        raise HTTPException(400, "A prévia exige dry_run=true.")
+
+    operation = payload.get("operation")
+    if not isinstance(operation, str) or operation not in _PREVIEW_ACTIONS:
+        raise HTTPException(400, "Operação não reconhecida para prévia.")
+
+    raw_instance_id = payload.get("instance_id")
+    try:
+        instance_id = str(UUID(str(raw_instance_id)))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(400, "Selecione uma instância válida.") from exc
+
+    parameters = payload.get("parameters", {})
+    if not isinstance(parameters, dict):
+        raise HTTPException(400, "Os parâmetros devem ser um objeto JSON.")
+    if {str(key).lower() for key in parameters} & {
+        "org_id", "instance_id", "api_key", "authorization", "token"
+    }:
+        raise HTTPException(400, "Parâmetros de autenticação e destino são reservados.")
+
+    method, path_template = _PREVIEW_ACTIONS[operation]
+    path = path_template.format(instance_id=instance_id)
+    preview: dict[str, Any] = {
+        "method": method,
+        "path": path,
+    }
+    if method == "GET":
+        preview["query"] = parameters
+    else:
+        preview["body"] = {"org_id": "[omitido na prévia]", **parameters}
+
+    return {
+        "mode": "preview_only",
+        "executed": False,
+        "message": "Prévia gerada. Nenhuma chamada foi enviada à AppRunCloud.",
+        "instance_id": instance_id,
+        "operation": operation,
+        "request": preview,
+    }
+
+
 @router.get("/instances/{instance_id}/account")
 async def get_instance_account(instance_id: UUID) -> dict:
     """Consulta qual conta está conectada à instância."""
@@ -233,4 +306,3 @@ async def get_instance_device(instance_id: UUID) -> dict:
     """Consulta informações e estado do device."""
     client = _client()
     return await _read(client.device(str(instance_id)))
-

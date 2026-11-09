@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
 const ROUTE_PREFIX = "/api/olimpo";
+const ACTION_PREVIEW_PATH = "/v1/integrations/appruncloud/actions/preview";
 const READ_ONLY_PATHS = [
   /^\/health$/,
   /^\/v1\/overview$/,
@@ -44,6 +45,7 @@ function upstreamUrl(request: NextRequest, allowLocalWrite: boolean): URL | null
   const segments = suffix.split("/");
   if (segments.some((segment) => segment === "." || segment === "..")) return null;
   const readOnly = request.method === "GET" && READ_ONLY_PATHS.some((pattern) => pattern.test(suffix));
+  const actionPreview = request.method === "POST" && suffix === ACTION_PREVIEW_PATH;
   if (request.method === "DELETE" && suffix.startsWith("/v1/accounts/") &&
       request.nextUrl.searchParams.get("confirm") !== "apagar-de-verdade") return null;
 
@@ -65,7 +67,7 @@ function upstreamUrl(request: NextRequest, allowLocalWrite: boolean): URL | null
   const canWriteLocally = allowLocalWrite && isLoopbackOrigin;
   const localWrite = canWriteLocally && (LOCAL_WRITE_PATHS[request.method] ?? [])
     .some((pattern) => pattern.test(suffix));
-  if (!readOnly && !localWrite) return null;
+  if (!readOnly && !localWrite && !actionPreview) return null;
 
   const target = new URL(suffix + request.nextUrl.search, origin);
   if (target.origin !== origin.origin) return null;
@@ -75,7 +77,9 @@ function upstreamUrl(request: NextRequest, allowLocalWrite: boolean): URL | null
 async function proxy(request: NextRequest): Promise<NextResponse> {
   try {
     const allowLocalWrite = process.env.NODE_ENV !== "production";
-    if (request.method !== "GET" && !allowLocalWrite) {
+    const isActionPreview = request.method === "POST" &&
+      request.nextUrl.pathname === `${ROUTE_PREFIX}${ACTION_PREVIEW_PATH}`;
+    if (request.method !== "GET" && !allowLocalWrite && !isActionPreview) {
       return NextResponse.json({ detail: "Este ambiente aceita somente consultas de leitura." }, { status: 405 });
     }
     const target = upstreamUrl(request, allowLocalWrite);
@@ -95,7 +99,22 @@ async function proxy(request: NextRequest): Promise<NextResponse> {
 
     let body: string | undefined;
     if (request.method === "POST" || request.method === "PATCH") {
-      if (request.nextUrl.pathname === `${ROUTE_PREFIX}/v1/accounts/bulk`) {
+      if (isActionPreview) {
+        const payload = await request.json().catch(() => null);
+        if (!payload || typeof payload !== "object" || Array.isArray(payload) ||
+            (payload as { dry_run?: boolean }).dry_run !== true ||
+            typeof (payload as { operation?: unknown }).operation !== "string" ||
+            typeof (payload as { instance_id?: unknown }).instance_id !== "string" ||
+            !(payload as { parameters?: unknown }).parameters ||
+            typeof (payload as { parameters?: unknown }).parameters !== "object" ||
+            Array.isArray((payload as { parameters?: unknown }).parameters)) {
+          return NextResponse.json(
+            { detail: "A prévia exige uma operação, uma instância, parâmetros JSON e dry_run=true." },
+            { status: 400 },
+          );
+        }
+        body = JSON.stringify(payload);
+      } else if (request.nextUrl.pathname === `${ROUTE_PREFIX}/v1/accounts/bulk`) {
         const payload = await request.json().catch(() => null);
         const acoesPermitidas = new Set([
           "set_status", "set_role", "bind_persona", "unbind_persona", "add_labels",
@@ -141,4 +160,3 @@ export const GET = proxy;
 export const POST = proxy;
 export const PATCH = proxy;
 export const DELETE = proxy;
-
