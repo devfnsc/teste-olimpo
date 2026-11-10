@@ -61,7 +61,14 @@ export async function mutate(
     headers: { "Content-Type": "application/json" },
     body: body ? JSON.stringify(body) : undefined,
   });
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText} — ${path}`);
+  if (!res.ok) {
+    let detail = "";
+    try {
+      const payload = await res.json();
+      detail = typeof payload?.detail === "string" ? payload.detail : "";
+    } catch { /* algumas respostas de proxy não têm JSON */ }
+    throw new Error(`${res.status} ${res.statusText}${detail ? ` — ${detail}` : ` — ${path}`}`);
+  }
   if (res.status === 204 || res.status === 205) return null;
   return res.json();
 }
@@ -87,3 +94,4 @@ export function subscribeEvents(onEvent: (e: unknown) => void): () => void {
 export function urlDaMidia(assetId: string): string {
   return `${BASE}/v1/media/${assetId}/arquivo`;
 }
+
