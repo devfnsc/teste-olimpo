@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 
 const ROUTE_PREFIX = "/api/olimpo";
 const ACTION_PREVIEW_PATH = "/v1/integrations/appruncloud/actions/preview";
+const PERSONA_GENERATE_PATH = "/v1/personas/generate";
 const READ_ONLY_PATHS = [
   /^\/health$/,
   /^\/v1\/overview$/,
@@ -46,6 +47,7 @@ function upstreamUrl(request: NextRequest, allowLocalWrite: boolean): URL | null
   if (segments.some((segment) => segment === "." || segment === "..")) return null;
   const readOnly = request.method === "GET" && READ_ONLY_PATHS.some((pattern) => pattern.test(suffix));
   const actionPreview = request.method === "POST" && suffix === ACTION_PREVIEW_PATH;
+  const personaGeneration = request.method === "POST" && suffix === PERSONA_GENERATE_PATH;
   if (request.method === "DELETE" && suffix.startsWith("/v1/accounts/") &&
       request.nextUrl.searchParams.get("confirm") !== "apagar-de-verdade") return null;
 
@@ -67,7 +69,7 @@ function upstreamUrl(request: NextRequest, allowLocalWrite: boolean): URL | null
   const canWriteLocally = allowLocalWrite && isLoopbackOrigin;
   const localWrite = canWriteLocally && (LOCAL_WRITE_PATHS[request.method] ?? [])
     .some((pattern) => pattern.test(suffix));
-  if (!readOnly && !localWrite && !actionPreview) return null;
+  if (!readOnly && !localWrite && !actionPreview && !personaGeneration) return null;
 
   const target = new URL(suffix + request.nextUrl.search, origin);
   if (target.origin !== origin.origin) return null;
@@ -79,7 +81,9 @@ async function proxy(request: NextRequest): Promise<NextResponse> {
     const allowLocalWrite = process.env.NODE_ENV !== "production";
     const isActionPreview = request.method === "POST" &&
       request.nextUrl.pathname === `${ROUTE_PREFIX}${ACTION_PREVIEW_PATH}`;
-    if (request.method !== "GET" && !allowLocalWrite && !isActionPreview) {
+    const isPersonaGeneration = request.method === "POST" &&
+      request.nextUrl.pathname === `${ROUTE_PREFIX}${PERSONA_GENERATE_PATH}`;
+    if (request.method !== "GET" && !allowLocalWrite && !isActionPreview && !isPersonaGeneration) {
       return NextResponse.json({ detail: "Este ambiente aceita somente consultas de leitura." }, { status: 405 });
     }
     const target = upstreamUrl(request, allowLocalWrite);
