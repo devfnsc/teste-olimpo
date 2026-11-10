@@ -66,6 +66,11 @@ export default function AppRunCloudInventory() {
 
   const parsedInstances = useMemo(() => extractInstances(data), [data]);
   const instances = parsedInstances ?? [];
+  const inventoryStatus = asRecord(data?.inventory_status);
+  const inventoryIsStale = inventoryStatus?.stale === true;
+  const inventoryLastSuccess = typeof inventoryStatus?.last_success_at === "string"
+    ? inventoryStatus.last_success_at
+    : null;
   const filtered = useMemo(() => {
     const term = query.trim().toLocaleLowerCase("pt-BR");
     if (!term) return instances;
@@ -102,6 +107,19 @@ export default function AppRunCloudInventory() {
           <RefreshCw size={13} className={isLoading ? "animate-spin" : ""} /> Atualizar
         </button>
       </header>
+
+      {!error && inventoryIsStale && (
+        <div className="flex items-start gap-2 rounded-md border border-amber-300/20 bg-amber-300/5 p-4 text-sm text-amber-100">
+          <AlertTriangle size={15} className="mt-0.5 shrink-0" />
+          <div>
+            <p className="font-medium">Exibindo o último inventário confirmado</p>
+            <p className="mt-1 text-xs text-amber-100/70">
+              A AppRunCloud falhou mesmo após novas tentativas. Esta lista pode estar desatualizada
+              {inventoryLastSuccess ? `; última consulta bem-sucedida: ${new Date(inventoryLastSuccess).toLocaleString("pt-BR")}.` : "."}
+            </p>
+          </div>
+        </div>
+      )}
 
       <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <Metric label="Instâncias retornadas" value={error ? "—" : instances.length} />
