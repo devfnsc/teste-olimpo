@@ -327,7 +327,9 @@ async def generate_persona(
     draft: PersonaGenerationInput,
 ) -> tuple[GeneratedPersonaOutput, dict[str, int]]:
     if not settings.gemini_api_key.strip():
-        raise PersonaGenerationError("Configure GEMINI_API_KEY para gerar personas.")
+        raise PersonaGenerationError(
+            "Configure GEMINI_API_KEY para gerar personas.", status_code=503
+        )
     if draft.age is not None and draft.age < 18:
         raise PersonaGenerationError("A idade mínima de uma persona é 18 anos.")
 
@@ -447,12 +449,21 @@ async def generate_persona(
         validate_generated_persona(generated, draft)
     except (ValidationError, json.JSONDecodeError, PersonaGenerationError) as exc:
         if isinstance(exc, PersonaGenerationError):
+            log.warning(
+                "persona.gemini_output_rejected",
+                model=settings.gemini_persona_model,
+                reason=str(exc)[:240],
+            )
             raise
+        validation_errors = (
+            exc.errors(include_input=False) if isinstance(exc, ValidationError) else []
+        )
         log.warning(
             "persona.gemini_output_invalid",
             model=settings.gemini_persona_model,
             output_tokens=(payload.get("usageMetadata") or {}).get("candidatesTokenCount"),
             error_type=type(exc).__name__,
+            validation_errors=validation_errors[:12],
         )
         raise PersonaGenerationError(
             "A resposta do Gemini não passou na validação. Nenhuma persona foi salva."
