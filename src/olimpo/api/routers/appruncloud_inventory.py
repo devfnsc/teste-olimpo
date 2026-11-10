@@ -7,9 +7,12 @@ device. Não usa os métodos de ação do cliente AppRunCloud.
 from __future__ import annotations
 
 import asyncio
+import copy
 import os
 import re
+import time
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
@@ -26,6 +29,11 @@ from olimpo.integrations.appruncloud import (
 
 router = APIRouter(prefix="/v1/integrations/appruncloud", tags=["AppRunCloud · leitura"])
 log = structlog.get_logger(__name__)
+
+_INVENTORY_CACHE_TTL_SECONDS = 20
+_INVENTORY_STALE_MAX_SECONDS = 300
+_inventory_cache: tuple[str, float, str, dict[str, Any]] | None = None
+_inventory_cache_lock = asyncio.Lock()
 
 _UUID_PATTERN = re.compile(
     r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
@@ -131,6 +139,7 @@ async def _read(operation: Awaitable[dict[str, Any]]) -> dict[str, Any]:
         raise HTTPException(
             502,
             "Falha ao consultar a AppRunCloud. Tente novamente.",
+            headers={"X-AppRunCloud-Status": str(exc.status_code)},
         ) from exc
     except AppRunCloudError as exc:
         log.warning(
@@ -143,6 +152,64 @@ async def _read(operation: Awaitable[dict[str, Any]]) -> dict[str, Any]:
         ) from exc
 
 
+async def _read_with_retry(
+    operation: Callable[[], Awaitable[dict[str, Any]]],
+    *,
+    attempts: int = 3,
+) -> dict[str, Any]:
+    """Repete apenas erros transitórios identificados pela AppRunCloud."""
+    transient_statuses = {429, 500, 502, 503, 504}
+    for attempt in range(attempts):
+        try:
+            return await _read(operation())
+        except HTTPException as exc:
+            raw_status = (exc.headers or {}).get("X-AppRunCloud-Status")
+            if attempt + 1 >= attempts or raw_status not in {str(code) for code in transient_statuses}:
+                raise
+            log.info(
+                "appruncloud.read_retry",
+                attempt=attempt + 1,
+                upstream_status=int(raw_status),
+            )
+            await asyncio.sleep(0.25 * (2 ** attempt))
+    raise RuntimeError("Consulta AppRunCloud encerrada sem resultado")
+
+
+async def _read_inventory(client: AppRunCloudClient) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Fresh cache curto e stale-if-error limitado para a lista de instâncias."""
+    global _inventory_cache
+    organization = client.config.org_id
+    now = time.monotonic()
+
+    async with _inventory_cache_lock:
+        cached = _inventory_cache if _inventory_cache and _inventory_cache[0] == organization else None
+        if cached and now - cached[1] <= _INVENTORY_CACHE_TTL_SECONDS:
+            return copy.deepcopy(cached[3]), {
+                "stale": False,
+                "last_success_at": cached[2],
+            }
+
+        try:
+            result = await _read_with_retry(client.get_instances)
+        except HTTPException:
+            if not cached or now - cached[1] > _INVENTORY_STALE_MAX_SECONDS:
+                raise
+            age_seconds = max(0, int(now - cached[1]))
+            log.warning(
+                "appruncloud.inventory_stale_served",
+                stale_age_seconds=age_seconds,
+            )
+            return copy.deepcopy(cached[3]), {
+                "stale": True,
+                "age_seconds": age_seconds,
+                "last_success_at": cached[2],
+            }
+
+        saved_at = datetime.now(UTC).isoformat()
+        _inventory_cache = (organization, time.monotonic(), saved_at, copy.deepcopy(result))
+        return result, {"stale": False, "last_success_at": saved_at}
+
+
 @router.get("/instances")
 async def list_instances(
     include_details: bool = False,
@@ -150,7 +217,12 @@ async def list_instances(
 ) -> dict[str, Any]:
     """Lista devices e contas vinculadas na organização configurada."""
     client = _client()
-    result = await _read(client.get_instances())
+    result, cache_status = await _read_inventory(client)
+    result = dict(result)
+    result["inventory_status"] = cache_status
+    if cache_status["stale"]:
+        # Evita novas consultas detalhadas durante uma instabilidade.
+        return result
     if not include_details:
         return result
 
@@ -171,18 +243,7 @@ async def list_instances(
         operation: Callable[[], Awaitable[dict[str, Any]]],
     ) -> dict[str, Any]:
         async with detail_semaphore:
-            for attempt in range(3):
-                try:
-                    return await _read(operation())
-                except HTTPException as exc:
-                    if (
-                        exc.status_code != 422
-                        or exc.headers.get("X-AppRunCloud-Status") == "400"
-                        or attempt == 2
-                    ):
-                        raise
-                    await asyncio.sleep(0.15 * (attempt + 1))
-            raise RuntimeError("Consulta detalhada encerrada sem resultado")
+            return await _read_with_retry(operation)
 
     def upstream_status(result: Any) -> int | None:
         if not isinstance(result, HTTPException):
@@ -297,19 +358,19 @@ async def preview_action(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
 async def get_instance_account(instance_id: UUID) -> dict:
     """Consulta qual conta está conectada à instância."""
     client = _client()
-    return await _read(client.account(str(instance_id)))
+    return await _read_with_retry(lambda: client.account(str(instance_id)))
 
 
 @router.get("/instances/{instance_id}/instagram/accounts")
 async def get_instance_instagram_accounts(instance_id: UUID) -> dict:
     """Lista todas as contas Instagram logadas no app da instância."""
     client = _client()
-    return await _read(client.instagram_accounts(str(instance_id)))
+    return await _read_with_retry(lambda: client.instagram_accounts(str(instance_id)))
 
 
 @router.get("/instances/{instance_id}/device")
 async def get_instance_device(instance_id: UUID) -> dict:
     """Consulta informações e estado do device."""
     client = _client()
-    return await _read(client.device(str(instance_id)))
+    return await _read_with_retry(lambda: client.device(str(instance_id)))
 
