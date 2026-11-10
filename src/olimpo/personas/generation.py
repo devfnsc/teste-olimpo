@@ -349,14 +349,23 @@ async def generate_persona(
             "candidateCount": 1,
         },
     }
+    # Gemini 3 contabiliza tokens de raciocínio dentro do mesmo teto da saída.
+    # O nível padrão pode consumir parte do limite antes do JSON completo; `low`
+    # preserva raciocínio suficiente para coerência e libera tokens para a ficha.
+    if settings.gemini_persona_model.casefold().startswith("gemini-3"):
+        request_body["generationConfig"]["thinkingConfig"] = {
+            "thinkingLevel": "LOW",
+            "includeThoughts": False,
+        }
     url = (
         "https://generativelanguage.googleapis.com/v1beta/models/"
         f"{settings.gemini_persona_model}:generateContent"
     )
+    payload: dict[str, Any] | None = None
     transient_statuses = {500, 502, 503, 504}
     try:
         async with httpx.AsyncClient(timeout=120.0) as client:
-            for attempt in range(3):
+            for attempt in range(4):
                 try:
                     response = await client.post(
                         url,
@@ -368,56 +377,71 @@ async def generate_persona(
                     break
                 except httpx.HTTPStatusError as exc:
                     status = exc.response.status_code
-                    should_retry = status in transient_statuses and attempt < 2
-                    log.warning(
-                        "persona.gemini_rejected",
+                    if status not in transient_statuses or attempt == 3:
+                        log.warning(
+                            "persona.gemini_rejected",
+                            status_code=status,
+                            model=settings.gemini_persona_model,
+                            attempts=attempt + 1,
+                        )
+                        if status == 429:
+                            raise PersonaGenerationError(
+                                "O Gemini atingiu o limite de chamadas. Tente mais tarde.",
+                                status_code=429,
+                            ) from exc
+                        if status in (401, 403):
+                            raise PersonaGenerationError(
+                                "O Gemini recusou a chave configurada.", status_code=502
+                            ) from exc
+                        raise PersonaGenerationError(
+                            "O serviço de geração está temporariamente indisponível. Tente novamente em alguns minutos.",
+                            status_code=503 if status in transient_statuses else 502,
+                        ) from exc
+                    delay = 1.0 * (2 ** attempt)
+                    log.info(
+                        "persona.gemini_retry",
                         status_code=status,
-                        model=settings.gemini_persona_model,
                         attempt=attempt + 1,
-                        retrying=should_retry,
+                        delay_seconds=delay,
                     )
-                    if should_retry:
-                        # A 503 do Gemini indica falta temporária de capacidade.
-                        await asyncio.sleep(0.75 * (2 ** attempt))
-                        continue
-                    if status == 429:
-                        raise PersonaGenerationError(
-                            "O Gemini atingiu o limite de chamadas. Tente mais tarde.",
-                            status_code=429,
-                        ) from exc
-                    if status in (401, 403):
-                        raise PersonaGenerationError("O Gemini recusou a chave configurada.") from exc
-                    if status in transient_statuses:
-                        raise PersonaGenerationError(
-                            "O Gemini está temporariamente indisponível após novas tentativas. "
-                            "Tente novamente em instantes; nenhuma persona foi salva.",
-                            status_code=503,
-                        ) from exc
-                    raise PersonaGenerationError(
-                        "O Gemini recusou a solicitação. Confira os parâmetros e tente novamente."
-                    ) from exc
-    except httpx.HTTPStatusError as exc:
-        # Segurança para respostas HTTPStatusError que escapem do laço.
-        raise PersonaGenerationError(
-            "O Gemini recusou a solicitação. Tente novamente.",
-            status_code=503 if exc.response.status_code in transient_statuses else 502,
-        ) from exc
+                    await asyncio.sleep(delay)
     except httpx.HTTPError as exc:
         log.warning("persona.gemini_unavailable", error_type=type(exc).__name__)
-        raise PersonaGenerationError(
-            "Não foi possível conectar ao Gemini. Tente novamente em instantes.",
-            status_code=503,
-        ) from exc
+        raise PersonaGenerationError("Não foi possível conectar ao Gemini.", 503) from exc
+
+    if payload is None:
+        raise PersonaGenerationError("O serviço de geração está temporariamente indisponível.", 503)
+
     candidates = payload.get("candidates") or []
     if not candidates:
+        feedback = payload.get("promptFeedback") or {}
+        reason = feedback.get("blockReason")
+        if reason:
+            log.warning("persona.gemini_prompt_blocked", block_reason=str(reason))
+            raise PersonaGenerationError(
+                "O Gemini bloqueou o pedido. Revise os dados informados e tente novamente."
+            )
         raise PersonaGenerationError("O Gemini não retornou uma resposta para a persona.")
     candidate = candidates[0]
-    if candidate.get("finishReason") == "MAX_TOKENS":
+    finish_reason = candidate.get("finishReason")
+    if finish_reason in {"SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT"}:
+        log.warning("persona.gemini_candidate_blocked", finish_reason=finish_reason)
         raise PersonaGenerationError(
-            "A resposta atingiu o limite de tokens e não foi salva. Reduza os detalhes ou aumente o teto."
+            "O Gemini bloqueou a resposta gerada. Tente novamente com outros dados."
+        )
+    if finish_reason == "MAX_TOKENS":
+        usage_raw = payload.get("usageMetadata") or {}
+        output_tokens = usage_raw.get("candidatesTokenCount", "desconhecido")
+        raise PersonaGenerationError(
+            f"O Gemini interrompeu a resposta ao atingir o limite de tokens ({output_tokens}). "
+            "Nenhuma persona foi salva. Tente novamente; o modelo agora usa menos tokens de raciocínio."
         )
     parts = (candidate.get("content") or {}).get("parts") or []
-    raw = "".join(part.get("text", "") for part in parts if isinstance(part, dict))
+    raw = "".join(
+        part.get("text", "")
+        for part in parts
+        if isinstance(part, dict) and not part.get("thought")
+    )
     try:
         generated = GeneratedPersonaOutput.model_validate_json(raw)
         validate_generated_persona(generated, draft)
@@ -447,3 +471,4 @@ async def generate_persona(
         narrative_lines=len(generated.narrative.splitlines()),
     )
     return generated, usage
+
