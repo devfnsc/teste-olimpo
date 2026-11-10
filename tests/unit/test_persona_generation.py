@@ -117,6 +117,20 @@ def test_validacao_preserva_historia_e_rejeita_dados_fixos_incoerentes() -> None
 
 
 @pytest.mark.asyncio
+async def test_chave_gemini_ausente_explica_configuracao_com_503(
+    fake_gemini: type[FakeClient], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(generation.settings, "gemini_api_key", "")
+
+    with pytest.raises(generation.PersonaGenerationError) as error:
+        await generation.generate_persona(generation.PersonaGenerationInput())
+
+    assert error.value.status_code == 503
+    assert "Configure GEMINI_API_KEY" in str(error.value)
+    assert fake_gemini.calls == 0
+
+
+@pytest.mark.asyncio
 async def test_repeticao_de_503_tem_sucesso_na_tentativa_seguinte(
     fake_gemini: type[FakeClient],
 ) -> None:
