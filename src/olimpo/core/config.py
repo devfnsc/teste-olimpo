@@ -36,6 +36,11 @@ class Settings(BaseSettings):
     litellm_master_key: str = ""
     llm_daily_budget_usd: float = 5.0
 
+    # Geração de personas: chamada direta ao Gemini, exclusivamente no backend.
+    gemini_api_key: str = ""
+    gemini_persona_model: str = "gemini-3.8-flash"
+    persona_generation_max_output_tokens: int = Field(default=8192, ge=2048, le=16384)
+
     # --- geração de mídia -------------------------------------------------
     # A geração com IMAGEM DE REFERÊNCIA e a de vídeo não passam pelo
     # gateway: ele só expõe texto→imagem. Ver media/providers/base.py.

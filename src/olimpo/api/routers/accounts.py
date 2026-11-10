@@ -20,11 +20,13 @@ from typing import Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import text
 
+from olimpo.core.config import settings
 from olimpo.core.db import session_scope
 from olimpo.integrations.actions import ARCHETYPES_BY_PLATFORM, default_archetype
+from olimpo.personas.generation import (PersonaGenerationError, PersonaGenerationInput, generate_persona, validate_generated_persona)
 
 router = APIRouter(prefix="/v1", tags=["contas"])
 
@@ -108,6 +110,13 @@ class PersonaIn(BaseModel):
     persona_engine_id: str | None = None
     labels: list[str] = []
     notes: str | None = None
+
+    @model_validator(mode="after")
+    def validate_age(self) -> PersonaIn:
+        age = (self.persona_card or {}).get("identity", {}).get("apparent_age")
+        if age is not None and (isinstance(age, bool) or not isinstance(age, int) or age < 18):
+            raise ValueError("a idade mínima de uma persona é 18 anos")
+        return self
 
 
 class PersonaPatch(BaseModel):
@@ -411,6 +420,10 @@ async def update_account(account_id: UUID, body: AccountPatch) -> dict[str, Any]
         fields["persona_id"] = None
     if not fields:
         raise HTTPException(400, "nada para atualizar")
+    if "persona_card" in fields:
+        age = (fields["persona_card"] or {}).get("identity", {}).get("apparent_age")
+        if age is not None and (isinstance(age, bool) or not isinstance(age, int) or age < 18):
+            raise HTTPException(422, "a idade mínima de uma persona é 18 anos")
 
     casts = {
         "status": "account_status", "autonomy": "autonomy_level",
@@ -605,6 +618,73 @@ async def create_persona(body: PersonaIn) -> dict[str, Any]:
             "slug": slug, "persona_card": json.dumps(body.persona_card),
         })).mappings().one()
     return linha(row)
+
+
+@router.post("/personas/generate", status_code=201)
+async def generate_and_create_persona(body: PersonaGenerationInput) -> dict[str, Any]:
+    """Gera a narrativa e o card numa chamada; valida tudo antes de salvar."""
+    if body.age is not None and body.age < 18:
+        raise HTTPException(422, "a idade mínima de uma persona é 18 anos")
+    try:
+        generated, usage = await generate_persona(body)
+        card = validate_generated_persona(generated, body)
+    except PersonaGenerationError as exc:
+        raise HTTPException(502, str(exc)) from exc
+
+    identity = card["identity"]
+    visual = card["visual"]
+    personality = card["personality"]
+    lore = card["lore"]
+    niche = card["niche"]
+    palette = visual.get("palette") or {}
+    wardrobe = visual.get("wardrobe") or {}
+    pillars = niche.get("content_pillars") or []
+    name = str(identity["name"]).strip()
+    base_slug = _slug(name) or "persona"
+
+    async with session_scope() as s:
+        slug = base_slug
+        suffix = 2
+        while (await s.execute(
+            text("SELECT 1 FROM personas WHERE slug = :slug"), {"slug": slug}
+        )).first():
+            slug = f"{base_slug}-{suffix}"
+            suffix += 1
+        row = (await s.execute(text("""
+            INSERT INTO personas (
+                name, slug, description, persona_card, persona_engine_id, labels, notes,
+                gender, apparent_age, physical_desc, backstory, niches, vibe_words,
+                clothing_style, palette, content_pillars, backstory_context, home_slots
+            ) VALUES (
+                :name, :slug, :description, CAST(:persona_card AS jsonb), NULL, '{}', NULL,
+                :gender, :apparent_age, :physical_desc, :backstory, :niches, :vibe_words,
+                :clothing_style, :palette, :content_pillars,
+                CAST(:backstory_context AS jsonb), CAST(:home_slots AS jsonb)
+            ) RETURNING *
+        """), {
+            "name": name,
+            "slug": slug,
+            "description": identity.get("bio"),
+            "persona_card": json.dumps(card, ensure_ascii=False),
+            "gender": identity.get("gender"),
+            "apparent_age": identity["apparent_age"],
+            "physical_desc": visual.get("canonical_description"),
+            "backstory": lore.get("backstory"),
+            "niches": [str(niche.get("primary", "")), *[str(v) for v in niche.get("secondary", [])]],
+            "vibe_words": [str(v) for v in personality.get("traits", [])],
+            "clothing_style": json.dumps(wardrobe, ensure_ascii=False),
+            "palette": [str(v) for v in (palette.get("primary", []) + palette.get("accent", []))],
+            "content_pillars": [str(p.get("name", "")) for p in pillars],
+            "backstory_context": json.dumps({"canonical_narrative": generated.narrative}, ensure_ascii=False),
+            "home_slots": json.dumps(visual.get("recurring_settings", []), ensure_ascii=False),
+        })).mappings().one()
+    return {
+        "persona": linha(row),
+        "narrative": generated.narrative,
+        "usage": {**usage, "model": settings.gemini_persona_model},
+    }
+
+
 
 
 @router.get("/personas/{persona_id}")

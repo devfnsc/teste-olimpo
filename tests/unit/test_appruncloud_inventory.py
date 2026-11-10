@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -12,11 +13,13 @@ from olimpo.api.routers import appruncloud_inventory as inventory
 from olimpo.integrations.appruncloud import (
     AppRunCloudBadRequestError,
     AppRunCloudError,
+    AppRunCloudHTTPError,
 )
 
 
 class FakeClient:
     def __init__(self, count: int = 8) -> None:
+        self.config = SimpleNamespace(org_id="test-org")
         self.instances = [
             {"id": str(uuid.uuid4()), "slot": index}
             for index in range(count - 1)
@@ -162,3 +165,69 @@ async def test_cancelamento_da_consulta_nao_vira_erro_parcial(
 
 
 
+
+
+@pytest.fixture(autouse=True)
+def reset_inventory_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(inventory, "_inventory_cache", None)
+
+
+@pytest.mark.asyncio
+async def test_502_transitorio_da_lista_e_repetido_antes_de_retornar(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = FakeClient()
+    attempts = 0
+
+    async def sometimes_fails() -> dict[str, Any]:
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise AppRunCloudHTTPError(502, "bad gateway", error="gateway")
+        return {"ok": True, "data": client.instances}
+
+    async def no_delay(_: float) -> None:
+        return None
+
+    client.get_instances = sometimes_fails  # type: ignore[method-assign]
+    monkeypatch.setattr(inventory, "_client", lambda: client)
+    monkeypatch.setattr(inventory.asyncio, "sleep", no_delay)
+
+    result = await inventory.list_instances()
+
+    assert attempts == 3
+    assert result["data"] == client.instances
+    assert result["inventory_status"]["stale"] is False
+
+
+@pytest.mark.asyncio
+async def test_502_persistente_usa_ultimo_inventario_bom_sem_fazer_fanout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = FakeClient()
+    saved_at = "2026-11-10T12:00:00+00:00"
+    cached_payload = {"ok": True, "data": client.instances}
+    monkeypatch.setattr(
+        inventory,
+        "_inventory_cache",
+        ("test-org", inventory.time.monotonic() - 30, saved_at, cached_payload),
+    )
+
+    async def unavailable() -> dict[str, Any]:
+        raise AppRunCloudHTTPError(502, "bad gateway", error="gateway")
+
+    async def no_delay(_: float) -> None:
+        return None
+
+    client.get_instances = unavailable  # type: ignore[method-assign]
+    monkeypatch.setattr(inventory, "_client", lambda: client)
+    monkeypatch.setattr(inventory.asyncio, "sleep", no_delay)
+
+    result = await inventory.list_instances(include_details=True)
+
+    assert result["data"] == client.instances
+    assert result["inventory_status"]["stale"] is True
+    assert result["inventory_status"]["last_success_at"] == saved_at
+    assert client.account_calls == []
+    assert client.instagram_accounts_calls == []
+    assert client.device_calls == []
