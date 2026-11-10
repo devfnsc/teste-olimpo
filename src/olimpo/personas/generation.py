@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from typing import Any
@@ -47,6 +48,10 @@ class GeneratedPersonaOutput(BaseModel):
 
 class PersonaGenerationError(Exception):
     """Erro amigável sem expor chave ou resposta bruta do Gemini."""
+
+    def __init__(self, message: str, *, status_code: int = 502) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 _CARD_BLOCKS = (
@@ -348,30 +353,61 @@ async def generate_persona(
         "https://generativelanguage.googleapis.com/v1beta/models/"
         f"{settings.gemini_persona_model}:generateContent"
     )
+    transient_statuses = {500, 502, 503, 504}
     try:
         async with httpx.AsyncClient(timeout=120.0) as client:
-            response = await client.post(
-                url,
-                headers={"x-goog-api-key": settings.gemini_api_key.strip()},
-                json=request_body,
-            )
-            response.raise_for_status()
-            payload = response.json()
+            for attempt in range(3):
+                try:
+                    response = await client.post(
+                        url,
+                        headers={"x-goog-api-key": settings.gemini_api_key.strip()},
+                        json=request_body,
+                    )
+                    response.raise_for_status()
+                    payload = response.json()
+                    break
+                except httpx.HTTPStatusError as exc:
+                    status = exc.response.status_code
+                    should_retry = status in transient_statuses and attempt < 2
+                    log.warning(
+                        "persona.gemini_rejected",
+                        status_code=status,
+                        model=settings.gemini_persona_model,
+                        attempt=attempt + 1,
+                        retrying=should_retry,
+                    )
+                    if should_retry:
+                        # A 503 do Gemini indica falta temporária de capacidade.
+                        await asyncio.sleep(0.75 * (2 ** attempt))
+                        continue
+                    if status == 429:
+                        raise PersonaGenerationError(
+                            "O Gemini atingiu o limite de chamadas. Tente mais tarde.",
+                            status_code=429,
+                        ) from exc
+                    if status in (401, 403):
+                        raise PersonaGenerationError("O Gemini recusou a chave configurada.") from exc
+                    if status in transient_statuses:
+                        raise PersonaGenerationError(
+                            "O Gemini está temporariamente indisponível após novas tentativas. "
+                            "Tente novamente em instantes; nenhuma persona foi salva.",
+                            status_code=503,
+                        ) from exc
+                    raise PersonaGenerationError(
+                        "O Gemini recusou a solicitação. Confira os parâmetros e tente novamente."
+                    ) from exc
     except httpx.HTTPStatusError as exc:
-        log.warning(
-            "persona.gemini_rejected",
-            status_code=exc.response.status_code,
-            model=settings.gemini_persona_model,
-        )
-        if exc.response.status_code == 429:
-            raise PersonaGenerationError("O Gemini atingiu o limite de chamadas. Tente mais tarde.") from exc
-        if exc.response.status_code in (401, 403):
-            raise PersonaGenerationError("O Gemini recusou a chave configurada.") from exc
-        raise PersonaGenerationError("O Gemini não conseguiu gerar a persona nesta tentativa.") from exc
+        # Segurança para respostas HTTPStatusError que escapem do laço.
+        raise PersonaGenerationError(
+            "O Gemini recusou a solicitação. Tente novamente.",
+            status_code=503 if exc.response.status_code in transient_statuses else 502,
+        ) from exc
     except httpx.HTTPError as exc:
         log.warning("persona.gemini_unavailable", error_type=type(exc).__name__)
-        raise PersonaGenerationError("Não foi possível conectar ao Gemini.") from exc
-
+        raise PersonaGenerationError(
+            "Não foi possível conectar ao Gemini. Tente novamente em instantes.",
+            status_code=503,
+        ) from exc
     candidates = payload.get("candidates") or []
     if not candidates:
         raise PersonaGenerationError("O Gemini não retornou uma resposta para a persona.")

@@ -629,7 +629,7 @@ async def generate_and_create_persona(body: PersonaGenerationInput) -> dict[str,
         generated, usage = await generate_persona(body)
         card = validate_generated_persona(generated, body)
     except PersonaGenerationError as exc:
-        raise HTTPException(502, str(exc)) from exc
+        raise HTTPException(exc.status_code, str(exc)) from exc
 
     identity = card["identity"]
     visual = card["visual"]
