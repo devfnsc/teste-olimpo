@@ -14,6 +14,7 @@ from olimpo.integrations.appruncloud import (
     AppRunCloudBadRequestError,
     AppRunCloudError,
     AppRunCloudHTTPError,
+    AppRunCloudTransportError,
 )
 
 
@@ -198,6 +199,33 @@ async def test_502_transitorio_da_lista_e_repetido_antes_de_retornar(
     assert attempts == 3
     assert result["data"] == client.instances
     assert result["inventory_status"]["stale"] is False
+
+
+@pytest.mark.asyncio
+async def test_falha_de_transporte_transitoria_e_repetida(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = FakeClient()
+    attempts = 0
+
+    async def sometimes_disconnects() -> dict[str, Any]:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise AppRunCloudTransportError("connection dropped")
+        return {"ok": True, "data": client.instances}
+
+    async def no_delay(_: float) -> None:
+        return None
+
+    client.get_instances = sometimes_disconnects  # type: ignore[method-assign]
+    monkeypatch.setattr(inventory, "_client", lambda: client)
+    monkeypatch.setattr(inventory.asyncio, "sleep", no_delay)
+
+    result = await inventory.list_instances()
+
+    assert attempts == 2
+    assert result["data"] == client.instances
 
 
 @pytest.mark.asyncio
