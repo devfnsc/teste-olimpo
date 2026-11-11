@@ -409,10 +409,15 @@ async def generate_persona(
                     await asyncio.sleep(delay)
     except httpx.HTTPError as exc:
         log.warning("persona.gemini_unavailable", error_type=type(exc).__name__)
-        raise PersonaGenerationError("Não foi possível conectar ao Gemini.", 503) from exc
+        raise PersonaGenerationError(
+            "Não foi possível conectar ao Gemini. Tente novamente em instantes.",
+            status_code=503,
+        ) from exc
 
     if payload is None:
-        raise PersonaGenerationError("O serviço de geração está temporariamente indisponível.", 503)
+        raise PersonaGenerationError(
+            "O serviço de geração está temporariamente indisponível.", status_code=503
+        )
 
     candidates = payload.get("candidates") or []
     if not candidates:

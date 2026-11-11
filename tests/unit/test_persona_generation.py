@@ -26,7 +26,7 @@ class FakeResponse:
 
 
 class FakeClient:
-    responses: ClassVar[list[FakeResponse]] = []
+    responses: ClassVar[list[FakeResponse | Exception]] = []
     calls: ClassVar[int] = 0
     request_bodies: ClassVar[list[dict]] = []
 
@@ -44,7 +44,10 @@ class FakeClient:
         body = __.get("json")
         if isinstance(body, dict):
             type(self).request_bodies.append(body)
-        return type(self).responses.pop(0)
+        response = type(self).responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
 
 
 @pytest.fixture
@@ -163,6 +166,20 @@ async def test_503_persistente_retorna_erro_transitorio_sem_expor_detalhes(
     assert error.value.status_code == 503
     assert "temporariamente indisponível" in str(error.value)
     assert fake_gemini.calls == 4
+
+
+@pytest.mark.asyncio
+async def test_falha_de_conexao_nao_gera_typeerror_no_tratamento(
+    fake_gemini: type[FakeClient],
+) -> None:
+    request = httpx.Request("POST", "https://example.test")
+    fake_gemini.responses = [httpx.ConnectError("connection refused", request=request)]
+
+    with pytest.raises(generation.PersonaGenerationError) as error:
+        await generation.generate_persona(generation.PersonaGenerationInput())
+
+    assert error.value.status_code == 503
+    assert "conectar ao Gemini" in str(error.value)
 
 
 @pytest.mark.asyncio
