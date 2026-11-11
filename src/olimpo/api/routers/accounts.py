@@ -15,20 +15,27 @@ trigrama, facetas contadas em uma passada e ações em lote.
 from __future__ import annotations
 
 import json
+import logging
 import re
+from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
-from uuid import UUID
+from uuid import UUID, uuid4
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import text
 
-from olimpo.core.config import settings
 from olimpo.core.db import session_scope
 from olimpo.integrations.actions import ARCHETYPES_BY_PLATFORM, default_archetype
-from olimpo.personas.generation import (PersonaGenerationError, PersonaGenerationInput, generate_persona, validate_generated_persona)
+from olimpo.personas.generation import (
+    PersonaGenerationError,
+    PersonaGenerationInput,
+    generate_persona,
+    validate_generated_persona,
+)
 
 router = APIRouter(prefix="/v1", tags=["contas"])
+log = logging.getLogger(__name__)
 
 #: Presença é o que a REALIDADE diz; `status` é o que NÓS queremos. Uma conta
 #: pode estar `active` e há três dias fora do inventário — e é justamente essa
@@ -420,10 +427,6 @@ async def update_account(account_id: UUID, body: AccountPatch) -> dict[str, Any]
         fields["persona_id"] = None
     if not fields:
         raise HTTPException(400, "nada para atualizar")
-    if "persona_card" in fields:
-        age = (fields["persona_card"] or {}).get("identity", {}).get("apparent_age")
-        if age is not None and (isinstance(age, bool) or not isinstance(age, int) or age < 18):
-            raise HTTPException(422, "a idade mínima de uma persona é 18 anos")
 
     casts = {
         "status": "account_status", "autonomy": "autonomy_level",
@@ -620,8 +623,7 @@ async def create_persona(body: PersonaIn) -> dict[str, Any]:
     return linha(row)
 
 
-@router.post("/personas/generate", status_code=201)
-async def generate_and_create_persona(body: PersonaGenerationInput) -> dict[str, Any]:
+async def _generate_and_create_persona(body: PersonaGenerationInput) -> dict[str, Any]:
     """Gera a narrativa e o card numa chamada; valida tudo antes de salvar."""
     if body.age is not None and body.age < 18:
         raise HTTPException(422, "a idade mínima de uma persona é 18 anos")
@@ -681,10 +683,62 @@ async def generate_and_create_persona(body: PersonaGenerationInput) -> dict[str,
     return {
         "persona": linha(row),
         "narrative": generated.narrative,
-        "usage": {**usage, "model": settings.gemini_persona_model},
+        "usage": usage,
     }
 
 
+_PERSONA_GENERATION_JOBS: dict[str, dict[str, Any]] = {}
+
+
+def _prune_persona_generation_jobs() -> None:
+    cutoff = datetime.now(UTC) - timedelta(hours=2)
+    for job_id, job in list(_PERSONA_GENERATION_JOBS.items()):
+        if job["created_at"] < cutoff:
+            _PERSONA_GENERATION_JOBS.pop(job_id, None)
+
+
+async def _run_persona_generation_job(job_id: str, body: PersonaGenerationInput) -> None:
+    job = _PERSONA_GENERATION_JOBS[job_id]
+    job["status"] = "running"
+    try:
+        job["result"] = await _generate_and_create_persona(body)
+        job["status"] = "completed"
+    except HTTPException as exc:
+        job["status"] = "failed"
+        job["detail"] = str(exc.detail)
+        job["status_code"] = exc.status_code
+    except Exception:
+        job["status"] = "failed"
+        job["detail"] = "Falha interna ao gerar ou salvar a persona. Consulte os logs da API."
+        job["status_code"] = 500
+        log.exception("persona.generation_job_failed job_id=%s", job_id)
+
+
+@router.post("/personas/generate", status_code=202)
+async def generate_and_create_persona(
+    body: PersonaGenerationInput,
+    background_tasks: BackgroundTasks,
+) -> dict[str, str]:
+    """Enfileira geração para que o painel possa acompanhar sem proxy longo."""
+    if body.age is not None and body.age < 18:
+        raise HTTPException(422, "a idade mínima de uma persona é 18 anos")
+    _prune_persona_generation_jobs()
+    job_id = str(uuid4())
+    _PERSONA_GENERATION_JOBS[job_id] = {
+        "status": "queued",
+        "created_at": datetime.now(UTC),
+    }
+    background_tasks.add_task(_run_persona_generation_job, job_id, body)
+    return {"job_id": job_id, "status": "queued"}
+
+
+@router.get("/personas/generate/jobs/{job_id}")
+async def get_persona_generation_job(job_id: str) -> dict[str, Any]:
+    _prune_persona_generation_jobs()
+    job = _PERSONA_GENERATION_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(404, "a geração não existe ou expirou; atualize a lista de personas")
+    return {key: value for key, value in job.items() if key != "created_at"}
 
 
 @router.get("/personas/{persona_id}")
@@ -720,6 +774,10 @@ async def update_persona(persona_id: UUID, body: PersonaPatch) -> dict[str, Any]
     fields = {k: v for k, v in body.model_dump().items() if v is not None}
     if not fields:
         raise HTTPException(400, "nada para atualizar")
+    if "persona_card" in fields:
+        age = (fields["persona_card"] or {}).get("identity", {}).get("apparent_age")
+        if age is not None and (isinstance(age, bool) or not isinstance(age, int) or age < 18):
+            raise HTTPException(422, "a idade mínima de uma persona é 18 anos")
     sets, params = [], {"id": persona_id}
     for k, v in fields.items():
         if k == "persona_card":
