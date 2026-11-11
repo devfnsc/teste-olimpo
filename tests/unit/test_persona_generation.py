@@ -183,6 +183,25 @@ async def test_falha_de_conexao_nao_gera_typeerror_no_tratamento(
 
 
 @pytest.mark.asyncio
+async def test_timeout_tem_uma_retentativa_e_pode_retornar_resposta_valida(
+    fake_gemini: type[FakeClient],
+) -> None:
+    output = valid_output()
+    request = httpx.Request("POST", "https://example.test")
+    fake_gemini.responses = [
+        httpx.ReadTimeout("model is still generating", request=request),
+        FakeResponse(200, {"candidates": [{"content": {"parts": [{
+            "text": output.model_dump_json(),
+        }]}}]}),
+    ]
+
+    generated, _ = await generation.generate_persona(generation.PersonaGenerationInput())
+
+    assert fake_gemini.calls == 2
+    assert generated.narrative == output.narrative
+
+
+@pytest.mark.asyncio
 async def test_resposta_interrompida_por_limite_de_tokens_fica_explicita(
     fake_gemini: type[FakeClient],
 ) -> None:
