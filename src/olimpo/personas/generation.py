@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import re
 from typing import Any
@@ -325,7 +326,7 @@ def validate_generated_persona(
 
 async def generate_persona(
     draft: PersonaGenerationInput,
-) -> tuple[GeneratedPersonaOutput, dict[str, int]]:
+) -> tuple[GeneratedPersonaOutput, dict[str, int | str]]:
     if not settings.gemini_api_key.strip():
         raise PersonaGenerationError(
             "Configure GEMINI_API_KEY para gerar personas.", status_code=503
@@ -359,69 +360,115 @@ async def generate_persona(
             "thinkingLevel": "LOW",
             "includeThoughts": False,
         }
-    url = (
-        "https://generativelanguage.googleapis.com/v1beta/models/"
-        f"{settings.gemini_persona_model}:generateContent"
-    )
     payload: dict[str, Any] | None = None
     transient_statuses = {500, 502, 503, 504}
+    models = [settings.gemini_persona_model]
+    fallback_model = settings.gemini_persona_fallback_model.strip()
+    if fallback_model and fallback_model not in models:
+        models.append(fallback_model)
     # Respostas estruturadas completas podem demorar mais que respostas de
-    # texto simples. Separe o tempo de conexão do tempo de geração e permita
-    # uma repetição curta quando a conexão cair antes de chegar a resposta.
+    # texto simples. Separe o tempo de conexão do tempo de geração.
     timeout = httpx.Timeout(connect=20.0, read=240.0, write=30.0, pool=20.0)
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
-            for attempt in range(4):
-                try:
-                    response = await client.post(
-                        url,
-                        headers={"x-goog-api-key": settings.gemini_api_key.strip()},
-                        json=request_body,
-                    )
-                    response.raise_for_status()
-                    payload = response.json()
-                    break
-                except (httpx.ConnectTimeout, httpx.ReadTimeout) as exc:
-                    if attempt == 1:
-                        raise
-                    delay = 2.0 * (attempt + 1)
-                    log.warning(
-                        "persona.gemini_timeout_retry",
-                        error_type=type(exc).__name__,
-                        attempt=attempt + 1,
-                        delay_seconds=delay,
-                    )
-                    await asyncio.sleep(delay)
-                except httpx.HTTPStatusError as exc:
-                    status = exc.response.status_code
-                    if status not in transient_statuses or attempt == 3:
-                        log.warning(
-                            "persona.gemini_rejected",
-                            status_code=status,
-                            model=settings.gemini_persona_model,
-                            attempts=attempt + 1,
+            for model_index, model in enumerate(models):
+                url = (
+                    "https://generativelanguage.googleapis.com/v1beta/models/"
+                    f"{model}:generateContent"
+                )
+                retry_with_fallback = False
+                for attempt in range(2):
+                    try:
+                        response = await client.post(
+                            url,
+                            headers={"x-goog-api-key": settings.gemini_api_key.strip()},
+                            json=request_body,
                         )
-                        if status == 429:
+                        response.raise_for_status()
+                        payload = response.json()
+                        break
+                    except (httpx.ConnectTimeout, httpx.ReadTimeout) as exc:
+                        if attempt == 0:
+                            delay = 2.0
+                            log.warning(
+                                "persona.gemini_timeout_retry",
+                                error_type=type(exc).__name__, model=model,
+                                attempt=attempt + 1, delay_seconds=delay,
+                            )
+                            await asyncio.sleep(delay)
+                            continue
+                        log.warning(
+                            "persona.gemini_timeout",
+                            error_type=type(exc).__name__, model=model,
+                        )
+                        retry_with_fallback = model_index + 1 < len(models)
+                        if not retry_with_fallback:
                             raise PersonaGenerationError(
-                                "O Gemini atingiu o limite de chamadas. Tente mais tarde.",
-                                status_code=429,
+                                "O Gemini excedeu o tempo de resposta nos modelos disponíveis. Tente novamente em instantes.",
+                                status_code=503,
                             ) from exc
+                        break
+                    except httpx.HTTPStatusError as exc:
+                        status = exc.response.status_code
+                        error_info: dict[str, Any] = {}
+                        with contextlib.suppress(ValueError, AttributeError):
+                            error_info = (exc.response.json() or {}).get("error", {})
+                        provider_message = str(error_info.get("message", ""))[:240]
+                        provider_status = str(error_info.get("status", ""))[:80]
                         if status in (401, 403):
+                            log.warning(
+                                "persona.gemini_rejected", status_code=status,
+                                provider_status=provider_status, provider_message=provider_message,
+                                model=model,
+                            )
                             raise PersonaGenerationError(
                                 "O Gemini recusou a chave configurada.", status_code=502
                             ) from exc
-                        raise PersonaGenerationError(
-                            "O serviço de geração está temporariamente indisponível. Tente novamente em alguns minutos.",
-                            status_code=503 if status in transient_statuses else 502,
-                        ) from exc
-                    delay = 1.0 * (2 ** attempt)
-                    log.info(
-                        "persona.gemini_retry",
-                        status_code=status,
-                        attempt=attempt + 1,
-                        delay_seconds=delay,
-                    )
-                    await asyncio.sleep(delay)
+                        if status == 429:
+                            log.warning(
+                                "persona.gemini_rate_limited", status_code=status,
+                                provider_status=provider_status, provider_message=provider_message,
+                                model=model,
+                            )
+                            raise PersonaGenerationError(
+                                "O Gemini atingiu o limite de chamadas. Tente novamente mais tarde.",
+                                status_code=429,
+                            ) from exc
+                        if status not in transient_statuses:
+                            log.warning(
+                                "persona.gemini_rejected", status_code=status,
+                                provider_status=provider_status, provider_message=provider_message,
+                                model=model,
+                            )
+                            raise PersonaGenerationError(
+                                "O Gemini recusou o pedido de geração. Verifique a configuração da API.",
+                                status_code=502,
+                            ) from exc
+                        if attempt == 0:
+                            delay = 3.0
+                            log.warning(
+                                "persona.gemini_retry", status_code=status,
+                                provider_status=provider_status,
+                                provider_message=provider_message, model=model,
+                                attempt=attempt + 1, delay_seconds=delay,
+                            )
+                            await asyncio.sleep(delay)
+                            continue
+                        retry_with_fallback = model_index + 1 < len(models)
+                        log.warning(
+                            "persona.gemini_model_unavailable", status_code=status,
+                            provider_status=provider_status,
+                            provider_message=provider_message, model=model,
+                            fallback_model=(models[model_index + 1] if retry_with_fallback else None),
+                        )
+                        if not retry_with_fallback:
+                            raise PersonaGenerationError(
+                                "O Gemini está temporariamente indisponível nos modelos configurados. Tente novamente em alguns minutos.",
+                                status_code=503,
+                            ) from exc
+                        break
+                if payload is not None:
+                    break
     except httpx.HTTPError as exc:
         log.warning("persona.gemini_unavailable", error_type=type(exc).__name__)
         raise PersonaGenerationError(
@@ -494,10 +541,10 @@ async def generate_persona(
         "input_tokens": int(usage_raw.get("promptTokenCount", 0)),
         "output_tokens": int(usage_raw.get("candidatesTokenCount", 0)),
         "total_tokens": int(usage_raw.get("totalTokenCount", 0)),
+        "model": model,
     }
     log.info(
         "persona.gemini_generated",
-        model=settings.gemini_persona_model,
         **usage,
         narrative_lines=len(generated.narrative.splitlines()),
     )
