@@ -7,6 +7,7 @@ const READ_ONLY_PATHS = [
   /^\/health$/,
   /^\/v1\/overview$/,
   /^\/v1\/accounts(?:\/[^/]+)?$/,
+  /^\/v1\/personas\/generate\/jobs\/[^/]+$/,
   /^\/v1\/personas(?:\/[^/]+)?$/,
   /^\/v1\/servers(?:\/[^/]+)?$/,
   /^\/v1\/servers\/[^/]+\/(?:devices|discovered)$/,
@@ -164,3 +165,4 @@ export const GET = proxy;
 export const POST = proxy;
 export const PATCH = proxy;
 export const DELETE = proxy;
+
