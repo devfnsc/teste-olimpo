@@ -6,7 +6,9 @@ from typing import ClassVar
 
 import httpx
 import pytest
+from fastapi import BackgroundTasks
 
+from olimpo.api.routers import accounts
 from olimpo.personas import generation
 
 
@@ -29,6 +31,7 @@ class FakeClient:
     responses: ClassVar[list[FakeResponse | Exception]] = []
     calls: ClassVar[int] = 0
     request_bodies: ClassVar[list[dict]] = []
+    request_urls: ClassVar[list[str]] = []
 
     def __init__(self, **_: object) -> None:
         pass
@@ -39,9 +42,11 @@ class FakeClient:
     async def __aexit__(self, *_: object) -> None:
         return None
 
-    async def post(self, *_: object, **__: object) -> FakeResponse:
+    async def post(self, *args: object, **kwargs: object) -> FakeResponse:
         type(self).calls += 1
-        body = __.get("json")
+        if args and isinstance(args[0], str):
+            type(self).request_urls.append(args[0])
+        body = kwargs.get("json")
         if isinstance(body, dict):
             type(self).request_bodies.append(body)
         response = type(self).responses.pop(0)
@@ -55,6 +60,7 @@ def fake_gemini(monkeypatch: pytest.MonkeyPatch) -> type[FakeClient]:
     FakeClient.responses = []
     FakeClient.calls = 0
     FakeClient.request_bodies = []
+    FakeClient.request_urls = []
     monkeypatch.setattr(generation.settings, "gemini_api_key", "local-test-key")
     monkeypatch.setattr(generation.httpx, "AsyncClient", FakeClient)
     monkeypatch.setattr(generation.asyncio, "sleep", _no_sleep)
@@ -150,6 +156,7 @@ async def test_repeticao_de_503_tem_sucesso_na_tentativa_seguinte(
     assert fake_gemini.calls == 3
     assert generated.narrative == output.narrative
     assert usage["total_tokens"] == 0
+    assert "gemini-3.6-flash" in fake_gemini.request_urls[-1]
     config = fake_gemini.request_bodies[-1]["generationConfig"]
     assert config["thinkingConfig"] == {"thinkingLevel": "LOW", "includeThoughts": False}
 
@@ -199,6 +206,48 @@ async def test_timeout_tem_uma_retentativa_e_pode_retornar_resposta_valida(
 
     assert fake_gemini.calls == 2
     assert generated.narrative == output.narrative
+
+
+@pytest.mark.asyncio
+async def test_timeout_no_modelo_principal_aciona_modelo_flash_de_contingencia(
+    fake_gemini: type[FakeClient],
+) -> None:
+    output = valid_output()
+    request = httpx.Request("POST", "https://example.test")
+    fake_gemini.responses = [
+        httpx.ReadTimeout("generation timed out", request=request),
+        httpx.ReadTimeout("generation timed out", request=request),
+        FakeResponse(200, {"candidates": [{"content": {"parts": [{
+            "text": output.model_dump_json(),
+        }]}}]}),
+    ]
+
+    generated, _ = await generation.generate_persona(generation.PersonaGenerationInput())
+
+    assert generated.narrative == output.narrative
+    assert len(fake_gemini.request_urls) == 3
+    assert "gemini-3.6-flash" in fake_gemini.request_urls[-1]
+
+
+@pytest.mark.asyncio
+async def test_geracao_em_background_entrega_resultado_pelo_id_do_job(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_save(_: generation.PersonaGenerationInput) -> dict:
+        return {"persona": {"id": "persona-test"}, "narrative": "História", "usage": {}}
+
+    monkeypatch.setattr(accounts, "_generate_and_create_persona", fake_save)
+    response = await accounts.generate_and_create_persona(
+        generation.PersonaGenerationInput(), BackgroundTasks()
+    )
+    job_id = response["job_id"]
+
+    assert response["status"] == "queued"
+    await accounts._run_persona_generation_job(job_id, generation.PersonaGenerationInput())
+    result = await accounts.get_persona_generation_job(job_id)
+
+    assert result["status"] == "completed"
+    assert result["result"]["persona"]["id"] == "persona-test"
 
 
 @pytest.mark.asyncio
