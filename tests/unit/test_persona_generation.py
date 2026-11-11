@@ -165,14 +165,14 @@ async def test_repeticao_de_503_tem_sucesso_na_tentativa_seguinte(
 async def test_503_persistente_retorna_erro_transitorio_sem_expor_detalhes(
     fake_gemini: type[FakeClient],
 ) -> None:
-    fake_gemini.responses = [FakeResponse(503) for _ in range(4)]
+    fake_gemini.responses = [FakeResponse(503) for _ in range(6)]
 
     with pytest.raises(generation.PersonaGenerationError) as error:
         await generation.generate_persona(generation.PersonaGenerationInput())
 
     assert error.value.status_code == 503
     assert "temporariamente indisponível" in str(error.value)
-    assert fake_gemini.calls == 4
+    assert fake_gemini.calls == 6
 
 
 @pytest.mark.asyncio
@@ -227,6 +227,26 @@ async def test_timeout_no_modelo_principal_aciona_modelo_flash_de_contingencia(
     assert generated.narrative == output.narrative
     assert len(fake_gemini.request_urls) == 3
     assert "gemini-3.6-flash" in fake_gemini.request_urls[-1]
+
+
+@pytest.mark.asyncio
+async def test_modelo_flash_secundario_e_usado_quando_os_dois_primeiros_estao_indisponiveis(
+    fake_gemini: type[FakeClient],
+) -> None:
+    output = valid_output()
+    fake_gemini.responses = [
+        FakeResponse(503), FakeResponse(503),
+        FakeResponse(503), FakeResponse(503),
+        FakeResponse(200, {"candidates": [{"content": {"parts": [{
+            "text": output.model_dump_json(),
+        }]}}]}),
+    ]
+
+    generated, usage = await generation.generate_persona(generation.PersonaGenerationInput())
+
+    assert generated.narrative == output.narrative
+    assert usage["model"] == "gemini-3.5-flash"
+    assert "gemini-3.5-flash" in fake_gemini.request_urls[-1]
 
 
 @pytest.mark.asyncio
