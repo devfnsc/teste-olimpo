@@ -365,8 +365,12 @@ async def generate_persona(
     )
     payload: dict[str, Any] | None = None
     transient_statuses = {500, 502, 503, 504}
+    # Respostas estruturadas completas podem demorar mais que respostas de
+    # texto simples. Separe o tempo de conexão do tempo de geração e permita
+    # uma repetição curta quando a conexão cair antes de chegar a resposta.
+    timeout = httpx.Timeout(connect=20.0, read=240.0, write=30.0, pool=20.0)
     try:
-        async with httpx.AsyncClient(timeout=120.0) as client:
+        async with httpx.AsyncClient(timeout=timeout) as client:
             for attempt in range(4):
                 try:
                     response = await client.post(
@@ -377,6 +381,17 @@ async def generate_persona(
                     response.raise_for_status()
                     payload = response.json()
                     break
+                except (httpx.ConnectTimeout, httpx.ReadTimeout) as exc:
+                    if attempt == 1:
+                        raise
+                    delay = 2.0 * (attempt + 1)
+                    log.warning(
+                        "persona.gemini_timeout_retry",
+                        error_type=type(exc).__name__,
+                        attempt=attempt + 1,
+                        delay_seconds=delay,
+                    )
+                    await asyncio.sleep(delay)
                 except httpx.HTTPStatusError as exc:
                     status = exc.response.status_code
                     if status not in transient_statuses or attempt == 3:
