@@ -363,9 +363,13 @@ async def generate_persona(
     payload: dict[str, Any] | None = None
     transient_statuses = {500, 502, 503, 504}
     models = [settings.gemini_persona_model]
-    fallback_model = settings.gemini_persona_fallback_model.strip()
-    if fallback_model and fallback_model not in models:
-        models.append(fallback_model)
+    fallback_models = (
+        settings.gemini_persona_fallback_model.strip(),
+        settings.gemini_persona_secondary_fallback_model.strip(),
+    )
+    for fallback_model in fallback_models:
+        if fallback_model and fallback_model not in models:
+            models.append(fallback_model)
     # Respostas estruturadas completas podem demorar mais que respostas de
     # texto simples. Separe o tempo de conexão do tempo de geração.
     timeout = httpx.Timeout(connect=20.0, read=240.0, write=30.0, pool=20.0)
