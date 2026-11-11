@@ -25,6 +25,7 @@ from olimpo.integrations.appruncloud import (
     AppRunCloudConfigurationError,
     AppRunCloudError,
     AppRunCloudHTTPError,
+    AppRunCloudTransportError,
 )
 
 router = APIRouter(prefix="/v1/integrations/appruncloud", tags=["AppRunCloud · leitura"])
@@ -140,6 +141,17 @@ async def _read(operation: Awaitable[dict[str, Any]]) -> dict[str, Any]:
             502,
             "Falha ao consultar a AppRunCloud. Tente novamente.",
             headers={"X-AppRunCloud-Status": str(exc.status_code)},
+        ) from exc
+    except AppRunCloudTransportError as exc:
+        log.warning(
+            "appruncloud.read_transport_failed",
+            error_type=type(exc).__name__,
+        )
+        # Falha de transporte é temporária; marque 502 para o retry limitado.
+        raise HTTPException(
+            502,
+            "A conexão com a AppRunCloud caiu durante a consulta. Tente novamente.",
+            headers={"X-AppRunCloud-Status": "502"},
         ) from exc
     except AppRunCloudError as exc:
         log.warning(
