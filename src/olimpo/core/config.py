@@ -40,6 +40,7 @@ class Settings(BaseSettings):
     gemini_api_key: str = ""
     gemini_persona_model: str = "gemini-3.8-flash"
     gemini_persona_fallback_model: str = "gemini-3.6-flash"
+    gemini_persona_secondary_fallback_model: str = "gemini-3.5-flash"
     persona_generation_max_output_tokens: int = Field(default=8192, ge=2048, le=16384)
 
     # --- geração de mídia -------------------------------------------------
