@@ -151,13 +151,27 @@ function FormPersona({ onSaved, onClose }: { onSaved: () => void; onClose: () =>
     }
     setSalvando(true); setErro(null);
     try {
-      const response = await mutate("/v1/personas/generate", "POST", {
+      const job = await mutate("/v1/personas/generate", "POST", {
         ...(f.name.trim() ? { name: f.name.trim() } : {}),
         ...(f.city.trim() ? { city: f.city.trim() } : {}),
         ...(f.age ? { age: Number(f.age) } : {}),
       });
-      setResultado(response);
-      onSaved();
+      if (!job?.job_id) throw new Error("A API não confirmou o início da geração.");
+
+      const deadline = Date.now() + 10 * 60_000;
+      while (Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 2500));
+        const current = await api(`/v1/personas/generate/jobs/${encodeURIComponent(job.job_id)}`);
+        if (current.status === "completed" && current.result) {
+          setResultado(current.result);
+          onSaved();
+          return;
+        }
+        if (current.status === "failed") {
+          throw new Error(current.detail || "A geração falhou; nenhuma persona foi salva.");
+        }
+      }
+      throw new Error("A geração ainda está em andamento. Atualize a lista de personas antes de tentar novamente.");
     } catch (e) { setErro(String(e)); setSalvando(false); }
   }
 
@@ -217,3 +231,4 @@ function FormPersona({ onSaved, onClose }: { onSaved: () => void; onClose: () =>
     </div>
   );
 }
+
